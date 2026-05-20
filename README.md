@@ -46,6 +46,17 @@ Then use `/recall` in Claude Code (or Codex, or pi) or ask "find a past session 
 - Results tagged `[claude]`, `[codex]`, or `[pi]` with highlighted excerpts
 - No dependencies — Python 3.9+ stdlib only (sqlite3, json, argparse)
 
+## Tests
+
+```bash
+python3 -m unittest discover tests -v
+```
+
+Stdlib `unittest` only — no test deps. Synthetic JSONL fixtures generated
+in `tmpdir` from the suite itself (no fixture files committed). An
+integration test runs against any real pi sessions in `~/.pi/agent/sessions/`
+on the host and is skipped if none are present.
+
 ## Contributing
 
 Found a bug or have an idea? [Open an issue](https://github.com/arjunkmrm/recall/issues) or submit a pull request — contributions are welcome!
