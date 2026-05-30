@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0
+
+Closes #9.
+
+- Add **Cursor Agent** session support (Cursor IDE + `agent` CLI)
+- Indexes `~/.cursor/projects/*/agent-transcripts/<uuid>/<uuid>.jsonl`
+- New `--source cursor` filter; results tagged `[cursor]`
+- Decodes workspace slug to filesystem path for `--project` matching
+- Session timestamps use file mtime (Cursor JSONL has no message timestamps)
+- `read_session.py` detects Cursor transcripts by path under `agent-transcripts/`
+- Resume: `agent --resume <session-id>` (see SKILL.md)
+
+### Upgrading to 0.5.0
+
+Run `--reindex` once to pull Cursor sessions into the index:
+
+```bash
+python3 ~/.claude/skills/recall/scripts/recall.py --reindex "test"
+```
+
 ## 0.4.1
 
 - Make the positional `query` argument optional. When omitted, list every
