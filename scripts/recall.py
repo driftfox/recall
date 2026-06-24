@@ -450,15 +450,16 @@ def decode_cursor_project_slug(slug):
     if not slug or slug.isdigit():
         return ""
     parts = slug.split("-")
+    win_sep = "\\"
     if len(parts) < 2:
         if len(parts) == 1 and len(parts[0]) == 1 and parts[0].isalpha():
-            return f"{parts[0].upper()}:{os.sep}"
+            return f"{parts[0].upper()}:{win_sep}"
         return ""
 
     if len(parts[0]) == 1 and parts[0].isalpha():
         drive = parts[0].upper()
-        rest = os.sep.join(parts[1:])
-        return f"{drive}:{os.sep}{rest}"
+        rest = win_sep.join(parts[1:])
+        return f"{drive}:{win_sep}{rest}"
 
     if parts[0] in ("Users", "home", "tmp", "var", "opt"):
         return os.sep + os.sep.join(parts)
