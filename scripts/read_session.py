@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Pretty-print a Claude Code, Codex, pi, or Cursor Agent session transcript."""
+"""Pretty-print a Claude Code, Codex, pi, Grok, or Cursor Agent session transcript."""
 
 import json
 import sys
+from pathlib import Path
 
 TEXT_BLOCK_TYPES = {"text", "input_text", "output_text"}
 
@@ -10,6 +11,10 @@ SKIP_MARKERS = (
     "<user_instructions>", "<environment_context>",
     "<permissions instructions>", "# AGENTS.md instructions",
 )
+
+# Grok-only: these appear inside genuine Claude user turns (system-reminder
+# blocks are appended to real prompts), so they must not be in the shared list.
+GROK_SKIP_MARKERS = ("<user_info>", "<system-reminder>", "<git_status>")
 
 
 def extract_text(content):
@@ -69,6 +74,20 @@ def iter_messages(path):
                     continue
                 content = msg.get("content", "")
 
+            elif fmt == "grok":
+                # Grok: top-level type and a content string. Entries carrying
+                # synthetic_reason are harness context, not real turns.
+                if entry.get("synthetic_reason"):
+                    continue
+                etype = entry.get("type", "")
+                if etype in ("user", "human"):
+                    role = "user"
+                elif etype == "assistant":
+                    role = "assistant"
+                else:
+                    continue
+                content = entry.get("content", "")
+
             elif fmt == "claude":
                 # Resolve role from type or role fields
                 role = entry.get("role", "")
@@ -107,25 +126,33 @@ def iter_messages(path):
                     continue
 
             text = extract_text(content)
-            if not text or any(marker in text for marker in SKIP_MARKERS):
+            markers = SKIP_MARKERS + (GROK_SKIP_MARKERS if fmt == "grok" else ())
+            if not text or any(marker in text for marker in markers):
                 continue
 
             yield role, text
 
 
 def detect_format(path):
-    """Detect whether a session file is Claude Code, Codex, pi, or Cursor format.
+    """Detect whether a session file is Claude Code, Codex, pi, Grok, or Cursor format.
 
-    Detection runs on the first non-empty parseable line and returns one of
-    "cursor", "pi", "claude", or "codex". Cursor transcripts live under
-    ~/.cursor/projects/.../agent-transcripts/; pi headers carry `type:
-    "session"` and `cwd`; Claude files have `parentUuid` or a top-level
+    Cursor and Grok are settled by path. Cursor transcripts live under
+    ~/.cursor/projects/.../agent-transcripts/. Every Grok transcript is named
+    chat_history.jsonl inside a per-session directory and its entries are too
+    plain to tell apart from the others by content alone.
+
+    Otherwise detection runs on the first non-empty parseable line. Order
+    matters: pi headers carry both `type: "session"` and `cwd`, which is the
+    most distinctive signature; Claude files have `parentUuid` or a top-level
     `message`; Codex files have `record_type`, `instructions`, or
     `type: "session_meta"`.
     """
     norm = str(path).replace("\\", "/")
     if "/.cursor/projects/" in norm and "/agent-transcripts/" in norm:
         return "cursor"
+    path_obj = Path(path)
+    if path_obj.name == "chat_history.jsonl" or "/.grok/sessions/" in str(path_obj):
+        return "grok"
 
     with open(path, "r", encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -160,7 +187,7 @@ def detect_format(path):
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Pretty-print a Claude Code, Codex, pi, or Cursor Agent session transcript"
+        description="Pretty-print a Claude Code, Codex, pi, Grok, or Cursor Agent session transcript"
     )
     parser.add_argument("path", help="Path to a session .jsonl file")
     parser.add_argument("--pretty", action="store_true", help="Human-readable output instead of JSON")

@@ -1,20 +1,28 @@
 # Changelog
 
-## 0.5.0
+## Unreleased
 
-Closes #9.
-
-- Add **Cursor Agent** session support (Cursor IDE + `agent` CLI)
+- Add Grok CLI session support — indexes `~/.grok/sessions/**/chat_history.jsonl`
+  alongside Claude Code, Codex and pi
+- New `--source grok` filter; results tagged `[grok]`
+- Grok sessions are one directory each, with the cwd percent-encoded into the
+  parent directory name and an optional `summary.json` supplying the title,
+  cwd and creation time. Transcript entries carry no timestamps of their own.
+- Entries marked `synthetic_reason` are harness context rather than real turns,
+  and are skipped, as are `<user_info>`, `<system-reminder>` and `<git_status>`
+  blocks
+- `read_session.py` reads Grok transcripts, detected by path
+- Add **Cursor Agent** session support (Cursor IDE + `agent` CLI), closes #9
 - Indexes `~/.cursor/projects/*/agent-transcripts/<uuid>/<uuid>.jsonl`
 - New `--source cursor` filter; results tagged `[cursor]`
 - Decodes workspace slug to filesystem path for `--project` matching
-- Session timestamps use file mtime (Cursor JSONL has no message timestamps)
+- Cursor session timestamps use file mtime (Cursor JSONL has no message timestamps)
 - `read_session.py` detects Cursor transcripts by path under `agent-transcripts/`
 - Resume: `agent --resume <session-id>` (see SKILL.md)
 
-### Upgrading to 0.5.0
+### Upgrading
 
-Run `--reindex` once to pull Cursor sessions into the index:
+Run `--reindex` once to pull Grok and Cursor sessions into the index:
 
 ```bash
 python3 ~/.claude/skills/recall/scripts/recall.py --reindex "test"

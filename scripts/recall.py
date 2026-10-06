@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search past Claude Code, Codex, pi, and Cursor Agent sessions using FTS5 full-text search."""
+"""Search past Claude Code, Codex, pi, Grok, and Cursor Agent sessions using FTS5 full-text search."""
 
 import argparse
 import json
@@ -9,19 +9,70 @@ import sqlite3
 import sys
 import math
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from glob import glob
 from pathlib import Path
+from urllib.parse import unquote
+
+try:
+    import fcntl
+except ImportError:  # Windows has no flock; run unlocked as before
+    fcntl = None
 
 CLAUDE_DIR = Path.home() / ".claude"
 CODEX_DIR = Path.home() / ".codex"
 PI_DIR = Path.home() / ".pi"
+GROK_DIR = Path.home() / ".grok"
 CURSOR_DIR = Path.home() / ".cursor"
 DB_PATH = Path.home() / ".recall.db"
+DB_LOCK_PATH = Path.home() / ".recall.db.lock"
 CLAUDE_PROJECTS_DIR = CLAUDE_DIR / "projects"
 CODEX_SESSIONS_DIR = CODEX_DIR / "sessions"
 PI_SESSIONS_DIR = PI_DIR / "agent" / "sessions"
+GROK_SESSIONS_DIR = GROK_DIR / "sessions"
 CURSOR_PROJECTS_DIR = CURSOR_DIR / "projects"
+
+
+# How long a run waits for another run to finish indexing before giving up and
+# searching the index as it stands. Waiting forever would turn one stalled
+# process into a hang in every other session.
+LOCK_WAIT_SECONDS = 20
+
+
+@contextmanager
+def index_lock():
+    """Hold an exclusive lock for the duration of an index update.
+
+    Indexing is one write transaction spanning every file it parses, so a
+    second run that starts during a long index waits on SQLite's busy timeout
+    and then dies with "database is locked". Waiting on a file lock instead
+    means the second run simply skips indexing and searches.
+
+    Yields True when the lock was taken, False when the wait ran out.
+    On platforms without fcntl (Windows), yields True without locking,
+    which is the pre-lock behavior.
+    """
+    if fcntl is None:
+        yield True
+        return
+    with open(DB_LOCK_PATH, "a", encoding="utf-8") as lock_file:
+        deadline = time.monotonic() + LOCK_WAIT_SECONDS
+        while True:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    print(
+                        "Another process is indexing; searching the current index.",
+                        file=sys.stderr,
+                    )
+                    yield False
+                    return
+                time.sleep(0.1)
+        # Closing the file releases the lock on every path, exceptions included.
+        yield True
 
 
 CJK_RE = re.compile(
@@ -51,14 +102,14 @@ def create_schema(conn):
 
         CREATE VIRTUAL TABLE IF NOT EXISTS messages USING fts5(
             session_id UNINDEXED,
-            role,
+            role UNINDEXED,
             text,
             tokenize='porter unicode61'
         );
 
         CREATE VIRTUAL TABLE IF NOT EXISTS messages_cjk USING fts5(
             session_id UNINDEXED,
-            role,
+            role UNINDEXED,
             text,
             tokenize='trigram'
         );
@@ -80,6 +131,51 @@ def migrate_schema(conn):
 
 
 
+# The two message tables, and the tokenizer each is built with.
+MESSAGE_TABLES = (("messages", "porter unicode61"), ("messages_cjk", "trigram"))
+
+
+def migrate_message_columns(conn):
+    """Rebuild any message table that still indexes the role column.
+
+    `role` holds the literal words "user" and "assistant", so indexing it made
+    both behave as wildcards: on a 197k-message index, `MATCH 'assistant'`
+    matched 172,597 rows, only 5,038 of which contain the word. FTS5 column
+    options cannot be altered, so the table is rebuilt from the rows already in
+    it — nothing is re-read from disk, which matters because sessions whose
+    files have since been deleted exist nowhere else.
+    """
+    for table, tokenize in MESSAGE_TABLES:
+        schema = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = ?", (table,)).fetchone()
+        if not schema or "role UNINDEXED" in schema[0]:
+            continue
+
+        print(f"Rebuilding {table} so roles are no longer searchable...",
+              file=sys.stderr)
+        # One explicit transaction. Left to itself sqlite3 commits each DDL
+        # statement as it runs, so a run killed part way through would leave a
+        # half-built table that every later run then died on.
+        conn.execute("BEGIN")
+        try:
+            conn.execute(f"""
+                CREATE VIRTUAL TABLE {table}_rebuilt USING fts5(
+                    session_id UNINDEXED,
+                    role UNINDEXED,
+                    text,
+                    tokenize='{tokenize}'
+                )
+            """)
+            conn.execute(f"INSERT INTO {table}_rebuilt(session_id, role, text) "
+                         f"SELECT session_id, role, text FROM {table}")
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {table}_rebuilt RENAME TO {table}")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+
+
 def migrate_db_location():
     """Move recall.db from ~/.claude/ to ~/ if it exists at the old path."""
     old_path = CLAUDE_DIR / "recall.db"
@@ -94,6 +190,7 @@ def migrate_db_location():
 
 TEXT_BLOCK_TYPES = {"text", "input_text", "output_text"}
 CODEX_SKIP_MARKERS = ("<user_instructions>", "<environment_context>", "<permissions instructions>", "# AGENTS.md instructions")
+GROK_SKIP_MARKERS = ("<user_info>", "<system-reminder>", "<git_status>")
 
 
 def extract_text(content):
@@ -439,6 +536,91 @@ def parse_pi_session(path):
     return metadata, messages
 
 
+def parse_grok_session(path):
+    """Parse a Grok CLI chat_history.jsonl, returning (metadata, messages).
+
+    Grok sessions live in ~/.grok/sessions/<percent-encoded-cwd>/<uuid>/, one
+    directory per session, with the transcript in chat_history.jsonl. Entries
+    carry a top-level "type" and a "content" string; there are no timestamps,
+    so the session's time comes from the optional sibling summary.json, which
+    also supplies the cwd and the generated title.
+
+    Entries marked with "synthetic_reason" are harness context Grok injects
+    into the turn list rather than anything the user or the model said, so they
+    are skipped, as are the harness blocks in GROK_SKIP_MARKERS.
+    """
+    path = Path(path)
+    session_dir = path.parent
+    session_id = session_dir.name
+    project = ""
+    slug = None
+    earliest_ts = None
+    messages = []
+
+    summary_path = session_dir / "summary.json"
+    if summary_path.is_file():
+        try:
+            with open(summary_path, "r", encoding="utf-8", errors="replace") as f:
+                summary = json.load(f)
+            info = summary.get("info") or {}
+            project = info.get("cwd") or summary.get("git_root_dir") or ""
+            slug = summary.get("generated_title") or summary.get("session_summary") or None
+            earliest_ts = parse_iso_timestamp(summary.get("created_at"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+
+    if not project:
+        # The parent directory is the percent-encoded absolute cwd.
+        project = unquote(session_dir.parent.name)
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if entry.get("synthetic_reason"):
+                    continue
+
+                etype = entry.get("type", "")
+                if etype in ("user", "human"):
+                    role = "user"
+                elif etype == "assistant":
+                    role = "assistant"
+                else:
+                    continue
+
+                text = extract_text(entry.get("content", ""))
+                if not text:
+                    continue
+                if any(marker in text for marker in GROK_SKIP_MARKERS):
+                    continue
+
+                messages.append((role, text))
+
+    except (OSError, PermissionError) as e:
+        print(f"Warning: skipping {path}: {e}", file=sys.stderr)
+        return None
+
+    if not slug:
+        slug = session_id[:12]
+
+    metadata = {
+        "session_id": session_id,
+        "source": "grok",
+        "file_path": str(path),
+        "project": project,
+        "slug": slug,
+        "timestamp": earliest_ts or 0,
+    }
+    return metadata, messages
+
+
 # — Cursor Agent session parser ———————————————————————————————————————————
 
 def decode_cursor_project_slug(slug):
@@ -586,7 +768,7 @@ def index_sessions(conn, force=False):
     except sqlite3.OperationalError:
         pass
 
-    # Collect files from both sources
+    # Collect files from every source
     sources = []
 
     # Claude Code: ~/.claude/projects/**/*.jsonl
@@ -603,6 +785,11 @@ def index_sessions(conn, force=False):
     pi_pattern = str(PI_SESSIONS_DIR / "**" / "*.jsonl")
     for fpath in glob(pi_pattern, recursive=True):
         sources.append((fpath, "pi"))
+
+    # Grok: ~/.grok/sessions/**/chat_history.jsonl
+    grok_pattern = str(GROK_SESSIONS_DIR / "**" / "chat_history.jsonl")
+    for fpath in glob(grok_pattern, recursive=True):
+        sources.append((fpath, "grok"))
 
     # Cursor Agent: ~/.cursor/projects/*/agent-transcripts/*/*.jsonl
     cursor_pattern = str(CURSOR_PROJECTS_DIR / "**" / "agent-transcripts" / "*" / "*.jsonl")
@@ -641,6 +828,8 @@ def index_sessions(conn, force=False):
             result = parse_codex_session(fpath)
         elif source == "pi":
             result = parse_pi_session(fpath)
+        elif source == "grok":
+            result = parse_grok_session(fpath)
         else:  # cursor
             result = parse_cursor_session(fpath)
 
@@ -679,11 +868,15 @@ def index_sessions(conn, force=False):
         conn.execute("INSERT INTO messages_cjk(messages_cjk, rank) VALUES('automerge', 4)")
         conn.commit()
 
-    # Get totals
-    total_sessions = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
-    total_messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    return indexed, skipped, *index_totals(conn)
 
-    return indexed, skipped, total_sessions, total_messages
+
+def index_totals(conn):
+    """How many sessions and messages the index currently holds."""
+    return (
+        conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0],
+        conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
+    )
 
 
 # — Search —————————————————————————————————————————————————————————————————
@@ -852,8 +1045,10 @@ def search(conn, query, project=None, days=None, source=None, limit=10):
             recency_boost = math.exp(-0.693 * age_days / 30)  # half-life = 30 days
         else:
             recency_boost = 0.0
-        # Blend: 80% BM25, 20% recency. Recency term scales with typical BM25 magnitude.
-        blended_rank = rank * (1 - 0.2 * recency_boost)
+        # Blend: 80% BM25, 20% recency. bm25() is negative and results sort
+        # ascending, so a recent session has to be made *more* negative to move
+        # up. Subtracting moved it down the page instead.
+        blended_rank = rank * (1 + 0.2 * recency_boost)
 
         results.append((session_id, meta[0], meta[1], meta[2], meta[3], meta[4], excerpt, blended_rank))
 
@@ -875,15 +1070,15 @@ def format_timestamp(ts_ms):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Search past Claude Code, Codex, pi, and Cursor Agent sessions"
+        description="Search past Claude Code, Codex, pi, Grok, and Cursor Agent sessions"
     )
     parser.add_argument("query", nargs="?", help="Search query (FTS5 syntax: quotes for phrases, AND/OR/NOT). Omit to list all sessions in the time window without text matching.")
     parser.add_argument("--project", help="Filter to sessions from a specific project path (prefix match)")
     parser.add_argument("--days", type=int, help="Only sessions from last N days")
     parser.add_argument(
         "--source",
-        choices=["claude", "codex", "pi", "cursor"],
-        help="Filter by source (claude, codex, pi, or cursor)",
+        choices=["claude", "codex", "pi", "grok", "cursor"],
+        help="Filter by source (claude, codex, pi, grok, or cursor)",
     )
     parser.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     parser.add_argument("--reindex", action="store_true", help="Force full rebuild of the index")
@@ -902,9 +1097,18 @@ def main():
     create_schema(conn)
     migrate_schema(conn)
 
-    # Index
+    # Index — one run at a time, so concurrent runs queue instead of colliding.
+    # The role-column rebuild takes seconds on a large index, well past
+    # SQLite's busy timeout, so it must sit inside the lock too; a run that
+    # doesn't get the lock searches the old schema, which still works.
     t0 = time.time()
-    indexed, skipped, total_sessions, total_messages = index_sessions(conn, force=args.reindex)
+    with index_lock() as have_lock:
+        if have_lock:
+            migrate_message_columns(conn)
+            indexed, skipped, total_sessions, total_messages = index_sessions(conn, force=args.reindex)
+        else:
+            indexed = 0
+            total_sessions, total_messages = index_totals(conn)
     index_time = time.time() - t0
 
     if indexed > 0:
