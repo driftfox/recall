@@ -261,3 +261,28 @@ class TestIndexingOpencode(unittest.TestCase):
         recall.OPENCODE_DB = self.root / "does-not-exist.db"
         indexed, skipped, *_ = recall.index_sessions(self.index)
         self.assertEqual(indexed, 0)
+
+
+class TestReadSessionOpencode(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db = str(Path(self.tmp.name) / "opencode.db")
+        make_opencode_db(self.db, [SAMPLE_SESSION])
+        self.ref = f"{self.db}#ses_abc123"
+
+    def test_detects_opencode_reference(self):
+        self.assertEqual(read_session.detect_format(self.ref), "opencode")
+
+    def test_reads_user_and_assistant_text(self):
+        msgs = list(read_session.iter_messages(self.ref))
+        self.assertEqual([role for role, _ in msgs], ["user", "assistant"])
+        self.assertIn("needle", msgs[0][1])
+
+    def test_db_path_with_spaces_and_hash_in_name(self):
+        spaced = self.tmp.name + "/Application Support/opencode.db"
+        Path(spaced).parent.mkdir(parents=True, exist_ok=True)
+        make_opencode_db(spaced, [SAMPLE_SESSION])
+        ref = f"{spaced}#ses_abc123"
+        self.assertEqual(read_session.detect_format(ref), "opencode")
+        self.assertEqual(len(list(read_session.iter_messages(ref))), 2)

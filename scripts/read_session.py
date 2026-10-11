@@ -33,6 +33,17 @@ def extract_text(content):
 
 def iter_messages(path):
     """Yield (role, text) pairs from a session file, auto-detecting format."""
+    ref = _opencode_ref(path)
+    if ref:
+        from recall import parse_opencode_sessions
+
+        db_path, session_id = ref
+        for metadata, messages in parse_opencode_sessions(db_path):
+            if metadata["session_id"] == session_id:
+                yield from messages
+                return
+        return
+
     fmt = detect_format(path)
 
     with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -133,6 +144,15 @@ def iter_messages(path):
             yield role, text
 
 
+def _opencode_ref(path):
+    """Return (db_path, session_id) for a 'db#id' opencode reference, else None."""
+    text = str(path)
+    db, sep, session_id = text.rpartition("#")
+    if sep and db.endswith(".db"):
+        return db, session_id
+    return None
+
+
 def detect_format(path):
     """Detect whether a session file is Claude Code, Codex, pi, Grok, or Cursor format.
 
@@ -147,6 +167,8 @@ def detect_format(path):
     `message`; Codex files have `record_type`, `instructions`, or
     `type: "session_meta"`.
     """
+    if _opencode_ref(path):
+        return "opencode"
     norm = str(path).replace("\\", "/")
     if "/.cursor/projects/" in norm and "/agent-transcripts/" in norm:
         return "cursor"
