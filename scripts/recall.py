@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search past Claude Code, Codex, pi, Grok, and Cursor Agent sessions using FTS5 full-text search."""
+"""Search past Claude Code, Codex, pi, Grok, Cursor Agent, and opencode sessions using FTS5 full-text search."""
 
 import argparse
 import json
@@ -857,6 +857,58 @@ def parse_opencode_sessions(db_path):
 
 # — Indexing ———————————————————————————————————————————————————————————————
 
+def index_opencode(conn, force=False):
+    """Index opencode sessions from OPENCODE_DB. Returns (indexed, skipped)."""
+    db = OPENCODE_DB
+    if not db or not Path(db).is_file():
+        return 0, 0
+
+    try:
+        parsed = list(parse_opencode_sessions(db))
+    except sqlite3.Error as e:
+        print(f"Warning: skipping opencode database {db}: {e}", file=sys.stderr)
+        return 0, 0
+
+    existing = {
+        row[0]: row[1]
+        for row in conn.execute(
+            "SELECT session_id, mtime FROM sessions WHERE source = 'opencode'"
+        )
+    }
+
+    indexed = 0
+    skipped = 0
+    for metadata, messages in parsed:
+        sid = metadata["session_id"]
+        if not force and existing.get(sid) == metadata["mtime"]:
+            skipped += 1
+            continue
+
+        for table in ("sessions", "messages", "messages_cjk"):
+            conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
+
+        conn.execute(
+            "INSERT OR REPLACE INTO sessions "
+            "(session_id, source, file_path, project, slug, timestamp, mtime) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sid, metadata["source"], metadata["file_path"], metadata["project"],
+             metadata["slug"], metadata["timestamp"], metadata["mtime"]),
+        )
+        msg_rows = [(sid, role, text) for role, text in messages]
+        conn.executemany(
+            "INSERT INTO messages (session_id, role, text) VALUES (?, ?, ?)", msg_rows
+        )
+        cjk_rows = [r for r in msg_rows if has_cjk(r[2])]
+        if cjk_rows:
+            conn.executemany(
+                "INSERT INTO messages_cjk (session_id, role, text) VALUES (?, ?, ?)",
+                cjk_rows,
+            )
+        indexed += 1
+
+    return indexed, skipped
+
+
 def index_sessions(conn, force=False):
     """Scan and index new/changed session files from all sources."""
     if force:
@@ -963,6 +1015,10 @@ def index_sessions(conn, force=False):
             )
 
         indexed += 1
+
+    opencode_indexed, opencode_skipped = index_opencode(conn, force=force)
+    indexed += opencode_indexed
+    skipped += opencode_skipped
 
     conn.commit()
 
@@ -1176,15 +1232,15 @@ def format_timestamp(ts_ms):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Search past Claude Code, Codex, pi, Grok, and Cursor Agent sessions"
+        description="Search past Claude Code, Codex, pi, Grok, Cursor Agent, and opencode sessions"
     )
     parser.add_argument("query", nargs="?", help="Search query (FTS5 syntax: quotes for phrases, AND/OR/NOT). Omit to list all sessions in the time window without text matching.")
     parser.add_argument("--project", help="Filter to sessions from a specific project path (prefix match)")
     parser.add_argument("--days", type=int, help="Only sessions from last N days")
     parser.add_argument(
         "--source",
-        choices=["claude", "codex", "pi", "grok", "cursor"],
-        help="Filter by source (claude, codex, pi, grok, or cursor)",
+        choices=["claude", "codex", "pi", "grok", "cursor", "opencode"],
+        help="Filter by source (claude, codex, pi, grok, cursor, or opencode)",
     )
     parser.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     parser.add_argument("--reindex", action="store_true", help="Force full rebuild of the index")

@@ -212,3 +212,52 @@ class TestParseOpencodeSessions(unittest.TestCase):
         self.addCleanup(writer.close)
         ids = [md["session_id"] for md, _ in recall.parse_opencode_sessions(db)]
         self.assertIn("ses_live", ids)
+
+
+class TestIndexingOpencode(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.db = str(self.root / "opencode.db")
+        make_opencode_db(self.db, [SAMPLE_SESSION])
+
+        for name, value in (("CLAUDE_PROJECTS_DIR", self.root / "none"),
+                            ("CODEX_SESSIONS_DIR", self.root / "none"),
+                            ("PI_SESSIONS_DIR", self.root / "none"),
+                            ("GROK_SESSIONS_DIR", self.root / "none"),
+                            ("CURSOR_PROJECTS_DIR", self.root / "none"),
+                            ("OPENCODE_DB", Path(self.db))):
+            self.addCleanup(setattr, recall, name, getattr(recall, name))
+            setattr(recall, name, value)
+
+        self.index = sqlite3.connect(str(self.root / "index.db"))
+        recall.create_schema(self.index)
+        recall.migrate_schema(self.index)
+
+    def test_indexes_and_searches_opencode(self):
+        recall.index_sessions(self.index)
+        results = recall.search(self.index, "needle")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0][1], "opencode")
+        self.assertEqual(results[0][0], "ses_abc123")
+
+    def test_source_filter(self):
+        recall.index_sessions(self.index)
+        rows = recall.list_sessions(self.index, source="opencode")
+        self.assertEqual([r[0] for r in rows], ["ses_abc123"])
+
+    def test_unchanged_session_is_skipped_on_second_run(self):
+        recall.index_sessions(self.index)
+        _, skipped, *_ = recall.index_sessions(self.index)
+        self.assertGreaterEqual(skipped, 1)
+
+    def test_force_reindex_rebuilds(self):
+        recall.index_sessions(self.index)
+        indexed, _, *_ = recall.index_sessions(self.index, force=True)
+        self.assertEqual(indexed, 1)
+
+    def test_missing_db_is_skipped_without_error(self):
+        recall.OPENCODE_DB = self.root / "does-not-exist.db"
+        indexed, skipped, *_ = recall.index_sessions(self.index)
+        self.assertEqual(indexed, 0)
