@@ -1,7 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
+- Add opencode session support — indexes sessions from opencode's SQLite
+  database (`opencode.db`), resolved per OS or via `OPENCODE_DB`
+- New `--source opencode` filter; results tagged `[opencode]`
+- opencode keeps every session in one database rather than a file per session,
+  so sessions are tracked under a synthetic `<database>#<session-id>` path and
+  updated incrementally from `session.time_updated`; subagent sessions (those
+  with a parent) are indexed too
+- Sessions are read from the `session`/`message`/`part` tables, keeping user and
+  assistant `text` parts only; reasoning, tool calls, patches and step markers
+  are skipped, as are text parts flagged `synthetic` (harness-injected context)
+- `read_session.py` reads opencode sessions from a bare `ses_...` id or the
+  `<database>#<session-id>` reference recall prints
+- Resume: `opencode --session <id>` (see SKILL.md)
+- Add **Cursor Agent** session support (Cursor IDE + `agent` CLI), closes #9
+- Indexes `~/.cursor/projects/*/agent-transcripts/<uuid>/<uuid>.jsonl`
+- New `--source cursor` filter; results tagged `[cursor]`
+- Decodes workspace slug to filesystem path for `--project` matching
+- Cursor session timestamps use file mtime (Cursor JSONL has no message timestamps)
+- `read_session.py` detects Cursor transcripts by path under `agent-transcripts/`
+- Resume: `agent --resume <session-id>` (see SKILL.md)
 - Add Grok CLI session support — indexes `~/.grok/sessions/**/chat_history.jsonl`
   alongside Claude Code, Codex and pi
 - New `--source grok` filter; results tagged `[grok]`
@@ -12,21 +32,6 @@
   and are skipped, as are `<user_info>`, `<system-reminder>` and `<git_status>`
   blocks
 - `read_session.py` reads Grok transcripts, detected by path
-- Add **Cursor Agent** session support (Cursor IDE + `agent` CLI), closes #9
-- Indexes `~/.cursor/projects/*/agent-transcripts/<uuid>/<uuid>.jsonl`
-- New `--source cursor` filter; results tagged `[cursor]`
-- Decodes workspace slug to filesystem path for `--project` matching
-- Cursor session timestamps use file mtime (Cursor JSONL has no message timestamps)
-- `read_session.py` detects Cursor transcripts by path under `agent-transcripts/`
-- Resume: `agent --resume <session-id>` (see SKILL.md)
-- Add **opencode** session support — indexes sessions from opencode's SQLite
-  database (`opencode.db`), resolved per OS or via `OPENCODE_DB`
-- New `--source opencode` filter; results tagged `[opencode]`
-- Sessions are read from `session`/`message`/`part` tables, keeping user/assistant
-  text parts only; subagent sessions are indexed as their own sessions
-- `read_session.py` reads opencode sessions from a `<db>#<session-id>` reference
-- Resume: `opencode --session <id>` (see SKILL.md)
-- Run `--reindex` once to pull opencode sessions into the index
 
 ### Upgrading
 

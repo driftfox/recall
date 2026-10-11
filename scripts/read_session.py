@@ -34,21 +34,8 @@ def extract_text(content):
 
 def iter_messages(path):
     """Yield (role, text) pairs from a session file, auto-detecting format."""
-    ref = _opencode_ref(path)
-    if ref:
-        from recall import parse_opencode_sessions
-
-        db_path, session_id = ref
-        try:
-            sessions = parse_opencode_sessions(db_path)
-            for metadata, messages in sessions:
-                if metadata["session_id"] == session_id:
-                    yield from messages
-                    return
-        except (sqlite3.Error, OSError) as e:
-            print(f"Warning: could not read opencode session {path}: {e}",
-                  file=sys.stderr)
-            return
+    if looks_like_opencode(path):
+        yield from iter_opencode_messages(str(path))
         return
 
     fmt = detect_format(path)
@@ -151,13 +138,46 @@ def iter_messages(path):
             yield role, text
 
 
-def _opencode_ref(path):
-    """Return (db_path, session_id) for a 'db#id' opencode reference, else None."""
-    text = str(path)
-    db, sep, session_id = text.rpartition("#")
-    if sep and db.endswith(".db"):
-        return db, session_id
-    return None
+def looks_like_opencode(ref):
+    """True when ``ref`` names an opencode session.
+
+    Accepts a bare session id (``ses_...``) or the ``<db-path>#<session-id>``
+    value recall prints as its File: line.
+    """
+    import recall
+    if not ref:
+        return False
+    text = str(ref)
+    if "#" in text:
+        db_ref, _, session_id = text.rpartition("#")
+        return bool(db_ref) and bool(recall.OPENCODE_SESSION_ID_RE.match(session_id))
+    return bool(recall.OPENCODE_SESSION_ID_RE.match(text))
+
+
+def iter_opencode_messages(ref):
+    """Yield (role, text) pairs for an opencode session reference.
+
+    A ``<db-path>#<session-id>`` reference reads that database; a bare
+    ``ses_...`` id reads opencode's default database. Reuses recall's reader so
+    the transcript matches what recall indexes.
+    """
+    import recall
+    text = str(ref)
+    if "#" in text:
+        db_ref, _, session_id = text.rpartition("#")
+        db_path = Path(db_ref)
+    else:
+        db_path = recall.opencode_db()
+        session_id = text
+    try:
+        conn = recall._open_opencode_db(db_path)
+    except (sqlite3.Error, OSError) as e:
+        print(f"Warning: could not read opencode session {text}: {e}", file=sys.stderr)
+        return
+    try:
+        yield from recall.opencode_session_messages(conn, session_id)
+    finally:
+        conn.close()
 
 
 def detect_format(path):
@@ -175,7 +195,7 @@ def detect_format(path):
     `message`; Codex files have `record_type`, `instructions`, or
     `type: "session_meta"`.
     """
-    if _opencode_ref(path):
+    if looks_like_opencode(path):
         return "opencode"
     norm = str(path).replace("\\", "/")
     if "/.cursor/projects/" in norm and "/agent-transcripts/" in norm:

@@ -6,7 +6,7 @@ description: >
   "search session history", "what did we discuss", "remember when we"
 metadata:
   author: arjunkmrm
-  version: "0.4.1"
+  version: "0.6.0"
   license: MIT
 ---
 
@@ -114,6 +114,9 @@ Each result includes a `File:` path. Use it to read the raw transcript (auto-det
 python3 ~/.claude/skills/recall/scripts/read_session.py <File-path-from-result>
 ```
 
+For opencode the `File:` path is `<database>#<session-id>`; `read_session.py` also
+accepts a bare `ses_...` id and reads opencode's default database.
+
 If results are missing `File:` paths, run `--reindex` to backfill.
 
 ## Notes
@@ -132,6 +135,7 @@ If results are missing `File:` paths, run `--reindex` to backfill.
 - Dual-table FTS: English queries use Porter stemming, CJK queries use trigram matching
 - Omit the query argument for **list mode** — every session in the window, sorted by recency, no FTS
 - Provide a query for full-text search; both modes accept `--project`, `--days`, `--source`, `--limit`
+- opencode keeps every session in one SQLite database rather than a file apiece; `OPENCODE_DB` points recall at a specific database and `OPENCODE_DATA_DIR` at its data directory
 - **Upgrading from 0.3.x**: run `--reindex` once to pull in pi sessions
 - **Upgrading from 0.4.x**: run `--reindex` once to pull in Grok, Cursor Agent, and opencode sessions
 - **Upgrading from 0.2.x**: run `--reindex` once to build the CJK index
@@ -144,6 +148,6 @@ If results are missing `File:` paths, run `--reindex` to backfill.
 
 ## opencode-specific behavior
 
-- Sessions live in a single SQLite database (`opencode.db`), not per-session files; `read_session.py` reads it from a `<db>#<session-id>` reference.
-- Data directory is resolved per OS: `$XDG_DATA_HOME/opencode` (Linux), `~/Library/Application Support/opencode` (macOS), `%LOCALAPPDATA%\opencode\Data` (Windows); override with `OPENCODE_DB`.
-- The database is opened read-only. Subagent sessions are indexed as their own sessions.
+- Sessions live in a single SQLite database (`opencode.db`), not per-session files; `read_session.py` reads it from a `<db>#<session-id>` reference or a bare `ses_...` id.
+- The data directory is discovered across candidates — `$XDG_DATA_HOME/opencode` (else `~/.local/share/opencode`), macOS `~/Library/Application Support/opencode`, and Windows `%LOCALAPPDATA%\opencode\Data` — and the database is chosen from whichever candidate actually holds one (preferring `opencode.db`). Override the directory with `OPENCODE_DATA_DIR`, or point at a specific database with `OPENCODE_DB`.
+- The database is opened read-only. All sessions are indexed, including subagent sessions (those with a parent).

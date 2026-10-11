@@ -61,7 +61,8 @@ python3 -m unittest discover tests -v
 Stdlib `unittest` only — no test deps. Synthetic JSONL fixtures generated
 in `tmpdir` from the suite itself (no fixture files committed). Integration
 tests run against real sessions on the host when present (`~/.pi/agent/sessions/`
-for pi, `~/.cursor/projects/` for Cursor) and are skipped otherwise.
+for pi, `~/.cursor/projects/` for Cursor, opencode's database) and are skipped
+otherwise.
 
 ## Contributing
 

@@ -751,46 +751,81 @@ def parse_cursor_session(path):
 
 # — opencode session support ———————————————————————————————————————————————
 
-def opencode_data_dir():
-    """Return opencode's data directory for the current OS.
+def opencode_data_dirs():
+    """Candidate directories that may hold opencode's SQLite database.
 
-    Mirrors opencode's own env-paths lookup: XDG data dir on Linux, Application
-    Support on macOS, LOCALAPPDATA on Windows.
+    opencode resolves its data directory with an xdg-basedir-style lookup
+    (``$XDG_DATA_HOME/opencode``, else ``~/.local/share/opencode``), but builds
+    and platforms differ: macOS uses Application Support and some Windows builds
+    use ``%LOCALAPPDATA%\\opencode\\Data`` (or ``%LOCALAPPDATA%\\opencode``).
+    Every candidate is returned so callers can pick the one that actually holds
+    a database. ``OPENCODE_DATA_DIR`` overrides the whole list.
     """
+    explicit = os.environ.get("OPENCODE_DATA_DIR")
+    if explicit:
+        return [Path(explicit)]
+
+    dirs = []
     if sys.platform == "darwin":
-        return Path.home() / "Library" / "Application Support" / "opencode"
-    if sys.platform == "win32":
-        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
-        return Path(base) / "opencode" / "Data"
+        dirs.append(Path.home() / "Library" / "Application Support" / "opencode")
     base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
-    return Path(base) / "opencode"
+    dirs.append(Path(base) / "opencode")
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+        dirs.append(Path(local) / "opencode" / "Data")
+        dirs.append(Path(local) / "opencode")
+    return dirs
+
+
+def opencode_data_dir():
+    """opencode's data directory: the first candidate that exists, else the first."""
+    dirs = opencode_data_dirs()
+    for candidate in dirs:
+        if candidate.is_dir():
+            return candidate
+    return dirs[0]
 
 
 def resolve_opencode_db():
     """Return opencode's database path, or None when there is no usable DB.
 
     Honors the OPENCODE_DB override (absolute, or a filename inside the data
-    dir; ``:memory:`` means none). Otherwise prefers ``opencode.db`` (stable
-    channel) and falls back to the newest ``opencode-*.db`` (other channels).
+    dir; ``:memory:`` means none). Otherwise searches every candidate data
+    directory for ``opencode.db`` (stable channel), falling back to the newest
+    ``opencode-*.db`` (other channels).
     """
     override = os.environ.get("OPENCODE_DB")
-    data_dir = opencode_data_dir()
     if override:
         if override == ":memory:":
             return None
         path = Path(override)
-        return path if path.is_absolute() else data_dir / path
+        return path if path.is_absolute() else opencode_data_dir() / path
 
-    default = data_dir / "opencode.db"
-    if default.exists() or not data_dir.is_dir():
-        return default
-    channel_dbs = list(data_dir.glob("opencode-*.db"))
-    if channel_dbs:
-        return max(channel_dbs, key=lambda p: p.stat().st_mtime)
-    return default
+    channel = None
+    for data_dir in opencode_data_dirs():
+        default = data_dir / "opencode.db"
+        if default.exists():
+            return default
+        if channel is None:
+            candidates = list(data_dir.glob("opencode-*.db"))
+            if candidates:
+                channel = max(candidates, key=lambda p: p.stat().st_mtime)
+    if channel is not None:
+        return channel
+    return opencode_data_dirs()[0] / "opencode.db"
 
 
-OPENCODE_DB = resolve_opencode_db()
+# Tests (and advanced callers) may set this to a concrete database path to
+# bypass discovery; None means "resolve from the environment on each access".
+OPENCODE_DB = None
+
+
+def opencode_db():
+    """The database to read: the OPENCODE_DB override, else the resolved default."""
+    return OPENCODE_DB if OPENCODE_DB is not None else resolve_opencode_db()
+
+
+OPENCODE_SESSION_ID_RE = re.compile(r"^ses_[A-Za-z0-9_-]+$")
 
 
 def _open_opencode_db(db_path):
@@ -819,45 +854,79 @@ def _open_opencode_db(db_path):
     return conn
 
 
+def opencode_session_messages(conn, session_id):
+    """Return [(role, text), ...] for one opencode session, from an open connection.
+
+    Roles come from the ``message`` table and text from ``part``, read
+    separately so multi-part turns are joined with newlines in order and
+    synthetic (harness-generated) parts are skipped.
+    """
+    roles = {}
+    for (message_id, data) in conn.execute(
+        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id",
+        (session_id,),
+    ):
+        try:
+            roles[message_id] = json.loads(data).get("role")
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            roles[message_id] = None
+
+    texts = {}
+    for (message_id, data) in conn.execute(
+        "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created",
+        (session_id,),
+    ):
+        try:
+            part = json.loads(data)
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue
+        if not isinstance(part, dict) or part.get("type") != "text":
+            continue
+        if part.get("synthetic"):
+            continue
+        text = part.get("text", "")
+        if text:
+            texts.setdefault(message_id, []).append(text)
+
+    out = []
+    for message_id, role in roles.items():
+        if role not in ("user", "assistant"):
+            continue
+        parts = texts.get(message_id)
+        if parts:
+            out.append((role, "\n".join(parts)))
+    return out
+
+
 def parse_opencode_sessions(db_path):
     """Yield (metadata, messages) for every session in an opencode database.
 
     Reads the ``session``/``message``/``part`` tables and keeps user/assistant
-    text parts only. The database is opened read-only and finally closed.
+    text only. Prefers the ``slug`` column when present (older databases lack
+    it) and falls back to the title. Opened read-only and finally closed.
     """
     conn = _open_opencode_db(db_path)
     try:
-        rows = conn.execute(
-            "SELECT id, title, directory, time_created, time_updated FROM session"
-        ).fetchall()
-        for session_id, title, directory, created, updated in rows:
-            messages = []
-            for (mdata, pdata) in conn.execute(
-                "SELECT m.data, p.data FROM message m JOIN part p "
-                "ON p.message_id = m.id WHERE m.session_id = ? "
-                "ORDER BY m.time_created, p.time_created",
-                (session_id,),
-            ):
-                try:
-                    role = json.loads(mdata).get("role")
-                    part = json.loads(pdata)
-                except (json.JSONDecodeError, TypeError, AttributeError):
-                    continue
-                if role not in ("user", "assistant"):
-                    continue
-                if not isinstance(part, dict) or part.get("type") != "text":
-                    continue
-                text = part.get("text", "")
-                if text:
-                    messages.append((role, text))
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(session)")}
+        has_slug = "slug" in columns
+        select = (
+            "id, slug, title, directory, time_created, time_updated" if has_slug
+            else "id, title, directory, time_created, time_updated"
+        )
+        for row in conn.execute(f"SELECT {select} FROM session").fetchall():
+            if has_slug:
+                session_id, slug, title, directory, created, updated = row
+            else:
+                session_id, title, directory, created, updated = row
+                slug = None
 
-            slug = title or (session_id[:12] if session_id else "")
+            messages = opencode_session_messages(conn, session_id)
             metadata = {
                 "session_id": session_id,
                 "source": "opencode",
                 "file_path": f"{db_path}#{session_id}",
                 "project": directory or "",
-                "slug": slug,
+                "slug": slug or title or (session_id[:12] if session_id else ""),
                 "timestamp": created or 0,
                 "mtime": (updated or 0) / 1000.0,
             }
@@ -868,41 +937,40 @@ def parse_opencode_sessions(db_path):
 
 # — Indexing ———————————————————————————————————————————————————————————————
 
-def index_opencode(conn, force=False):
-    """Index opencode sessions from OPENCODE_DB. Returns (indexed, skipped)."""
-    db = OPENCODE_DB
+def index_opencode_sessions(conn, existing, force=False):
+    """Index opencode sessions into the index. Returns (indexed, skipped).
+
+    ``existing`` maps file_path to (session_id, mtime) for already-indexed
+    sessions (built by index_sessions), so unchanged databases are skipped.
+    """
+    db = opencode_db()
     if not db or not Path(db).is_file():
         return 0, 0
 
     try:
         parsed = list(parse_opencode_sessions(db))
-    except (sqlite3.Error, ValueError, TypeError, AttributeError) as e:
+    except (sqlite3.Error, OSError, ValueError, TypeError, AttributeError) as e:
         print(f"Warning: skipping opencode database {db}: {e}", file=sys.stderr)
         return 0, 0
-
-    existing = {
-        row[0]: row[1]
-        for row in conn.execute(
-            "SELECT session_id, mtime FROM sessions WHERE source = 'opencode'"
-        )
-    }
 
     indexed = 0
     skipped = 0
     for metadata, messages in parsed:
+        file_path = metadata["file_path"]
         sid = metadata["session_id"]
-        if not force and existing.get(sid) == metadata["mtime"]:
+        if not force and existing.get(file_path, (None, None))[1] == metadata["mtime"]:
             skipped += 1
             continue
 
+        old_sid = existing[file_path][0] if file_path in existing else sid
         for table in ("sessions", "messages", "messages_cjk"):
-            conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
+            conn.execute(f"DELETE FROM {table} WHERE session_id = ?", (old_sid,))
 
         conn.execute(
             "INSERT OR REPLACE INTO sessions "
             "(session_id, source, file_path, project, slug, timestamp, mtime) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (sid, metadata["source"], metadata["file_path"], metadata["project"],
+            (sid, metadata["source"], file_path, metadata["project"],
              metadata["slug"], metadata["timestamp"], metadata["mtime"]),
         )
         msg_rows = [(sid, role, text) for role, text in messages]
@@ -1027,9 +1095,9 @@ def index_sessions(conn, force=False):
 
         indexed += 1
 
-    opencode_indexed, opencode_skipped = index_opencode(conn, force=force)
-    indexed += opencode_indexed
-    skipped += opencode_skipped
+    oc_indexed, oc_skipped = index_opencode_sessions(conn, existing, force=force)
+    indexed += oc_indexed
+    skipped += oc_skipped
 
     conn.commit()
 
