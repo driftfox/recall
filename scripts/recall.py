@@ -793,6 +793,68 @@ def resolve_opencode_db():
 OPENCODE_DB = resolve_opencode_db()
 
 
+def _open_opencode_db(db_path):
+    """Open the opencode DB read-only, falling back to a plain read connection.
+
+    mode=ro over a URI avoids ever touching the file; some WAL setups refuse it,
+    in which case a normal connection is used and only SELECTs are issued.
+    """
+    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True)
+        conn.execute("SELECT 1")
+        return conn
+    except sqlite3.OperationalError:
+        return sqlite3.connect(str(db_path))
+
+
+def parse_opencode_sessions(db_path):
+    """Yield (metadata, messages) for every session in an opencode database.
+
+    Reads the ``session``/``message``/``part`` tables and keeps user/assistant
+    text parts only. The database is opened read-only and finally closed.
+    """
+    conn = _open_opencode_db(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT id, title, directory, time_created, time_updated FROM session"
+        ).fetchall()
+        for session_id, title, directory, created, updated in rows:
+            messages = []
+            for (mdata, pdata) in conn.execute(
+                "SELECT m.data, p.data FROM message m JOIN part p "
+                "ON p.message_id = m.id WHERE m.session_id = ? "
+                "ORDER BY m.time_created, p.time_created",
+                (session_id,),
+            ):
+                try:
+                    role = json.loads(mdata).get("role")
+                    part = json.loads(pdata)
+                except (json.JSONDecodeError, TypeError, AttributeError):
+                    continue
+                if role not in ("user", "assistant"):
+                    continue
+                if part.get("type") != "text":
+                    continue
+                text = part.get("text", "")
+                if text:
+                    messages.append((role, text))
+
+            slug = title or (session_id[:12] if session_id else "")
+            metadata = {
+                "session_id": session_id,
+                "source": "opencode",
+                "file_path": f"{db_path}#{session_id}",
+                "project": directory or "",
+                "slug": slug,
+                "timestamp": created or 0,
+                "mtime": (updated or 0) / 1000.0,
+            }
+            yield metadata, messages
+    finally:
+        conn.close()
+
+
 # — Indexing ———————————————————————————————————————————————————————————————
 
 def index_sessions(conn, force=False):
