@@ -797,15 +797,26 @@ def _open_opencode_db(db_path):
     """Open the opencode DB read-only, falling back to a plain read connection.
 
     mode=ro over a URI avoids ever touching the file; some WAL setups refuse it,
-    in which case a normal connection is used and only SELECTs are issued.
+    in which case a plain connection is opened in query-only mode, so only
+    SELECTs are ever issued. A missing file raises instead of being created.
     """
-    uri = Path(db_path).resolve().as_uri() + "?mode=ro"
+    path = Path(db_path)
+    if not path.is_file():
+        raise sqlite3.OperationalError(f"no such database file: {db_path}")
+
+    uri = path.resolve().as_uri() + "?mode=ro"
+    conn = None
     try:
         conn = sqlite3.connect(uri, uri=True)
         conn.execute("SELECT 1")
         return conn
     except sqlite3.OperationalError:
-        return sqlite3.connect(str(db_path))
+        if conn is not None:
+            conn.close()
+
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA query_only = ON")
+    return conn
 
 
 def parse_opencode_sessions(db_path):
@@ -834,7 +845,7 @@ def parse_opencode_sessions(db_path):
                     continue
                 if role not in ("user", "assistant"):
                     continue
-                if part.get("type") != "text":
+                if not isinstance(part, dict) or part.get("type") != "text":
                     continue
                 text = part.get("text", "")
                 if text:
@@ -865,7 +876,7 @@ def index_opencode(conn, force=False):
 
     try:
         parsed = list(parse_opencode_sessions(db))
-    except sqlite3.Error as e:
+    except (sqlite3.Error, ValueError, TypeError, AttributeError) as e:
         print(f"Warning: skipping opencode database {db}: {e}", file=sys.stderr)
         return 0, 0
 

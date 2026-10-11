@@ -7,6 +7,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -16,11 +17,18 @@ import recall  # noqa: E402
 import read_session  # noqa: E402
 
 
+@contextmanager
 def _no_opencode_env(extra=None):
-    """Context manager: patch os.environ, always clearing OPENCODE_DB."""
+    """Context manager: patch os.environ, always clearing OPENCODE_DB.
+
+    ``mock.patch.dict`` restores the original environment (including any
+    ambient ``OPENCODE_DB``) on exit, so popping it inside is safe here.
+    """
     env = dict(extra or {})
     env.pop("OPENCODE_DB", None)
-    return mock.patch.dict(os.environ, env, clear=False)
+    with mock.patch.dict(os.environ, env, clear=False):
+        os.environ.pop("OPENCODE_DB", None)
+        yield
 
 
 class TestOpencodeDataDir(unittest.TestCase):
@@ -201,6 +209,18 @@ class TestParseOpencodeSessions(unittest.TestCase):
         _, messages = list(recall.parse_opencode_sessions(db))[0]
         self.assertEqual(messages, [("user", "kept")])
 
+    def test_non_object_part_json_is_skipped(self):
+        s = dict(SAMPLE_SESSION, id="ses_nonobj")
+        s["messages"] = [
+            {"id": "m1", "role": "user", "parts": [
+                {"type": "text", "text": "junk", "data": "[1, 2, 3]"},
+                {"type": "text", "text": "kept"}]},
+        ]
+        db = str(Path(self.tmp.name) / "nonobj.db")
+        make_opencode_db(db, [s])
+        _, messages = list(recall.parse_opencode_sessions(db))[0]
+        self.assertEqual(messages, [("user", "kept")])
+
     def test_reads_live_wal_database_while_a_writer_holds_it(self):
         db = str(Path(self.tmp.name) / "wal.db")
         writer = make_opencode_db(db, [SAMPLE_SESSION])
@@ -280,9 +300,64 @@ class TestReadSessionOpencode(unittest.TestCase):
         self.assertIn("needle", msgs[0][1])
 
     def test_db_path_with_spaces_and_hash_in_name(self):
-        spaced = self.tmp.name + "/Application Support/opencode.db"
+        spaced = self.tmp.name + "/Application Support#v2/opencode.db"
         Path(spaced).parent.mkdir(parents=True, exist_ok=True)
         make_opencode_db(spaced, [SAMPLE_SESSION])
         ref = f"{spaced}#ses_abc123"
         self.assertEqual(read_session.detect_format(ref), "opencode")
         self.assertEqual(len(list(read_session.iter_messages(ref))), 2)
+
+    def test_missing_db_reference_yields_no_messages(self):
+        ref = f"{self.tmp.name}/does-not-exist.db#ses_abc123"
+        self.assertEqual(read_session.detect_format(ref), "opencode")
+        self.assertEqual(list(read_session.iter_messages(ref)), [])
+
+
+class TestOpenOpencodeDb(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_missing_db_raises_without_creating_file(self):
+        missing = Path(self.tmp.name) / "nope.db"
+        with self.assertRaises(sqlite3.OperationalError):
+            recall._open_opencode_db(missing)
+        self.assertFalse(missing.exists())
+
+    def test_connection_rejects_writes(self):
+        db = str(Path(self.tmp.name) / "opencode.db")
+        make_opencode_db(db, [SAMPLE_SESSION])
+        conn = recall._open_opencode_db(db)
+        self.addCleanup(conn.close)
+        with self.assertRaises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO session VALUES ('x',NULL,'t','/w',1,2)")
+
+
+REAL_OPENCODE_DB = recall.resolve_opencode_db()
+
+
+@unittest.skipUnless(
+    REAL_OPENCODE_DB and Path(REAL_OPENCODE_DB).is_file(),
+    "no real opencode database on this host",
+)
+class TestRealOpencodeDatabase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        for name, value in (("CLAUDE_PROJECTS_DIR", self.root / "none"),
+                            ("CODEX_SESSIONS_DIR", self.root / "none"),
+                            ("PI_SESSIONS_DIR", self.root / "none"),
+                            ("GROK_SESSIONS_DIR", self.root / "none"),
+                            ("CURSOR_PROJECTS_DIR", self.root / "none"),
+                            ("OPENCODE_DB", REAL_OPENCODE_DB)):
+            self.addCleanup(setattr, recall, name, getattr(recall, name))
+            setattr(recall, name, value)
+
+    def test_indexes_real_database(self):
+        conn = sqlite3.connect(str(self.root / "index.db"))
+        self.addCleanup(conn.close)
+        recall.create_schema(conn)
+        recall.migrate_schema(conn)
+        indexed, *_ = recall.index_sessions(conn)
+        self.assertGreaterEqual(indexed, 1)

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Pretty-print a Claude Code, Codex, pi, Grok, or Cursor Agent session transcript."""
+"""Pretty-print a Claude Code, Codex, pi, Grok, Cursor Agent, or opencode session transcript."""
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -38,10 +39,16 @@ def iter_messages(path):
         from recall import parse_opencode_sessions
 
         db_path, session_id = ref
-        for metadata, messages in parse_opencode_sessions(db_path):
-            if metadata["session_id"] == session_id:
-                yield from messages
-                return
+        try:
+            sessions = parse_opencode_sessions(db_path)
+            for metadata, messages in sessions:
+                if metadata["session_id"] == session_id:
+                    yield from messages
+                    return
+        except (sqlite3.Error, OSError) as e:
+            print(f"Warning: could not read opencode session {path}: {e}",
+                  file=sys.stderr)
+            return
         return
 
     fmt = detect_format(path)
@@ -154,9 +161,10 @@ def _opencode_ref(path):
 
 
 def detect_format(path):
-    """Detect whether a session file is Claude Code, Codex, pi, Grok, or Cursor format.
+    """Detect whether a session file is Claude Code, Codex, pi, Grok, Cursor, or opencode format.
 
-    Cursor and Grok are settled by path. Cursor transcripts live under
+    opencode references (`<db>#<session-id>`) are settled by shape. Cursor and
+    Grok are settled by path. Cursor transcripts live under
     ~/.cursor/projects/.../agent-transcripts/. Every Grok transcript is named
     chat_history.jsonl inside a per-session directory and its entries are too
     plain to tell apart from the others by content alone.
@@ -209,7 +217,7 @@ def detect_format(path):
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Pretty-print a Claude Code, Codex, pi, Grok, or Cursor Agent session transcript"
+        description="Pretty-print a Claude Code, Codex, pi, Grok, Cursor Agent, or opencode session transcript"
     )
     parser.add_argument("path", help="Path to a session .jsonl file")
     parser.add_argument("--pretty", action="store_true", help="Human-readable output instead of JSON")
