@@ -19,10 +19,18 @@
 - Cursor session timestamps use file mtime (Cursor JSONL has no message timestamps)
 - `read_session.py` detects Cursor transcripts by path under `agent-transcripts/`
 - Resume: `agent --resume <session-id>` (see SKILL.md)
+- Add **opencode** session support — indexes sessions from opencode's SQLite
+  database (`opencode.db`), resolved per OS or via `OPENCODE_DB`
+- New `--source opencode` filter; results tagged `[opencode]`
+- Sessions are read from `session`/`message`/`part` tables, keeping user/assistant
+  text parts only; subagent sessions are indexed as their own sessions
+- `read_session.py` reads opencode sessions from a `<db>#<session-id>` reference
+- Resume: `opencode --session <id>` (see SKILL.md)
+- Run `--reindex` once to pull opencode sessions into the index
 
 ### Upgrading
 
-Run `--reindex` once to pull Grok and Cursor sessions into the index:
+Run `--reindex` once to pull Grok, Cursor, and opencode sessions into the index:
 
 ```bash
 python3 ~/.claude/skills/recall/scripts/recall.py --reindex "test"

@@ -1,7 +1,7 @@
 ---
 name: recall
 description: >
-  Search past Claude Code, Codex, pi, Grok, and Cursor Agent sessions. Triggers: /recall,
+  Search past Claude Code, Codex, pi, Grok, Cursor Agent, and opencode sessions. Triggers: /recall,
   "search old conversations", "find a past session", "recall a previous conversation",
   "search session history", "what did we discuss", "remember when we"
 metadata:
@@ -10,14 +10,14 @@ metadata:
   license: MIT
 ---
 
-# /recall — Search Past Claude, Codex, pi, Grok & Cursor Sessions
+# /recall — Search Past Claude, Codex, pi, Grok, Cursor & opencode Sessions
 
-Search all past Claude Code, Codex, pi, Grok, and **Cursor Agent** (IDE + CLI) sessions using full-text search with BM25 ranking.
+Search all past Claude Code, Codex, pi, Grok, **Cursor Agent** (IDE + CLI), and **opencode** sessions using full-text search with BM25 ranking.
 
 ## Usage
 
 ```bash
-python3 ~/.claude/skills/recall/scripts/recall.py [QUERY] [--project PATH] [--days N] [--source claude|codex|pi|grok|cursor] [--limit N] [--reindex]
+python3 ~/.claude/skills/recall/scripts/recall.py [QUERY] [--project PATH] [--days N] [--source claude|codex|pi|grok|cursor|opencode] [--limit N] [--reindex]
 ```
 
 ## Examples
@@ -59,6 +59,9 @@ python3 ~/.claude/skills/recall/scripts/recall.py "buffer" --source grok
 # Search only Cursor Agent sessions (IDE + CLI)
 python3 ~/.claude/skills/recall/scripts/recall.py "sorting" --source cursor --project quick-gtasks
 
+# Search only opencode sessions
+python3 ~/.claude/skills/recall/scripts/recall.py "buffer" --source opencode
+
 # Force reindex
 python3 ~/.claude/skills/recall/scripts/recall.py --reindex "test"
 ```
@@ -99,6 +102,10 @@ cd /path/to/project
 agent --resume SESSION_ID       # UUID from recall output
 # or: agent resume              # latest session
 # or: agent ls                  # pick interactively
+
+# opencode sessions [opencode]
+cd /path/to/project
+opencode --session SESSION_ID
 ```
 
 Each result includes a `File:` path. Use it to read the raw transcript (auto-detects format):
@@ -112,20 +119,21 @@ If results are missing `File:` paths, run `--reindex` to backfill.
 ## Notes
 
 - Index is stored at `~/.recall.db` (SQLite FTS5, auto-migrated from `~/.claude/recall.db`)
-- Indexes five sources:
+- Indexes six sources:
   - `~/.claude/projects/` — Claude Code
   - `~/.codex/sessions/` — Codex
   - `~/.pi/agent/sessions/` — pi
   - `~/.grok/sessions/**/chat_history.jsonl` — Grok
   - `~/.cursor/projects/*/agent-transcripts/` — **Cursor Agent** (IDE + `agent` CLI)
+  - `~/.local/share/opencode/opencode.db` — opencode
 - First run indexes all sessions (a few seconds); subsequent runs are incremental
 - Only user and assistant messages are indexed (tool calls, thinking blocks, state snapshots skipped)
-- Results show `[claude]`, `[codex]`, `[pi]`, `[grok]`, or `[cursor]` tags to indicate the source
+- Results show `[claude]`, `[codex]`, `[pi]`, `[grok]`, `[cursor]`, or `[opencode]` tags to indicate the source
 - Dual-table FTS: English queries use Porter stemming, CJK queries use trigram matching
 - Omit the query argument for **list mode** — every session in the window, sorted by recency, no FTS
 - Provide a query for full-text search; both modes accept `--project`, `--days`, `--source`, `--limit`
 - **Upgrading from 0.3.x**: run `--reindex` once to pull in pi sessions
-- **Upgrading from 0.4.x**: run `--reindex` once to pull in Grok and Cursor Agent sessions
+- **Upgrading from 0.4.x**: run `--reindex` once to pull in Grok, Cursor Agent, and opencode sessions
 - **Upgrading from 0.2.x**: run `--reindex` once to build the CJK index
 
 ## Cursor-specific behavior
@@ -133,3 +141,9 @@ If results are missing `File:` paths, run `--reindex` to backfill.
 - **Project path**: prefer `working_directory` from Shell tool calls in the transcript; fall back to decoding the encoded folder name under `~/.cursor/projects/` (hyphens in folder names like `quick-gtasks` are not always recoverable from the slug alone).
 - Session timestamps use file modification time (Cursor JSONL has no per-message timestamps).
 - `--project` matches path prefix **or** substring (e.g. `quick-gtasks` matches `C:\Users\you\src\quick-gtasks`).
+
+## opencode-specific behavior
+
+- Sessions live in a single SQLite database (`opencode.db`), not per-session files; `read_session.py` reads it from a `<db>#<session-id>` reference.
+- Data directory is resolved per OS: `$XDG_DATA_HOME/opencode` (Linux), `~/Library/Application Support/opencode` (macOS), `%LOCALAPPDATA%\opencode\Data` (Windows); override with `OPENCODE_DB`.
+- The database is opened read-only. Subagent sessions are indexed as their own sessions.
