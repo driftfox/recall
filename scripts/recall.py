@@ -749,6 +749,50 @@ def parse_cursor_session(path):
     return metadata, messages
 
 
+# — opencode session support ———————————————————————————————————————————————
+
+def opencode_data_dir():
+    """Return opencode's data directory for the current OS.
+
+    Mirrors opencode's own env-paths lookup: XDG data dir on Linux, Application
+    Support on macOS, LOCALAPPDATA on Windows.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "opencode"
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+        return Path(base) / "opencode" / "Data"
+    base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+    return Path(base) / "opencode"
+
+
+def resolve_opencode_db():
+    """Return opencode's database path, or None when there is no usable DB.
+
+    Honors the OPENCODE_DB override (absolute, or a filename inside the data
+    dir; ``:memory:`` means none). Otherwise prefers ``opencode.db`` (stable
+    channel) and falls back to the newest ``opencode-*.db`` (other channels).
+    """
+    override = os.environ.get("OPENCODE_DB")
+    data_dir = opencode_data_dir()
+    if override:
+        if override == ":memory:":
+            return None
+        path = Path(override)
+        return path if path.is_absolute() else data_dir / path
+
+    default = data_dir / "opencode.db"
+    if default.exists() or not data_dir.is_dir():
+        return default
+    channel_dbs = list(data_dir.glob("opencode-*.db"))
+    if channel_dbs:
+        return max(channel_dbs, key=lambda p: p.stat().st_mtime)
+    return default
+
+
+OPENCODE_DB = resolve_opencode_db()
+
+
 # — Indexing ———————————————————————————————————————————————————————————————
 
 def index_sessions(conn, force=False):
