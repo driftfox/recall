@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search past Claude Code, Codex, pi, Grok, Cursor Agent, and opencode sessions using FTS5 full-text search."""
+"""Search past Claude Code, Codex, pi, Grok, Cursor Agent, opencode and omp sessions using FTS5 full-text search."""
 
 import argparse
 import json
@@ -25,6 +25,7 @@ CODEX_DIR = Path.home() / ".codex"
 PI_DIR = Path.home() / ".pi"
 GROK_DIR = Path.home() / ".grok"
 CURSOR_DIR = Path.home() / ".cursor"
+OMP_DIR = Path.home() / ".omp"
 DB_PATH = Path.home() / ".recall.db"
 DB_LOCK_PATH = Path.home() / ".recall.db.lock"
 CLAUDE_PROJECTS_DIR = CLAUDE_DIR / "projects"
@@ -32,6 +33,33 @@ CODEX_SESSIONS_DIR = CODEX_DIR / "sessions"
 PI_SESSIONS_DIR = PI_DIR / "agent" / "sessions"
 GROK_SESSIONS_DIR = GROK_DIR / "sessions"
 CURSOR_PROJECTS_DIR = CURSOR_DIR / "projects"
+
+
+def omp_sessions_dir():
+    """Directory holding omp's session transcripts.
+
+    omp keeps its sessions under <agent dir>/sessions, where the agent dir is
+    ~/.omp/agent by default. PI_CODING_AGENT_DIR moves it, and on Linux and
+    macOS omp follows XDG_DATA_HOME once $XDG_DATA_HOME/omp exists (the
+    agent/ prefix is dropped there). OMP_SESSION_DIR points recall straight at
+    a sessions directory.
+    """
+    explicit = os.environ.get("OMP_SESSION_DIR")
+    if explicit:
+        return Path(explicit)
+    agent_dir = os.environ.get("PI_CODING_AGENT_DIR")
+    if agent_dir:
+        return Path(agent_dir) / "sessions"
+    if sys.platform in ("linux", "darwin"):
+        xdg = os.environ.get("XDG_DATA_HOME")
+        if xdg:
+            xdg_root = Path(xdg) / "omp"
+            if xdg_root.is_dir():
+                return xdg_root / "sessions"
+    return OMP_DIR / "agent" / "sessions"
+
+
+OMP_SESSIONS_DIR = omp_sessions_dir()
 
 
 # How long a run waits for another run to finish indexing before giving up and
@@ -749,6 +777,120 @@ def parse_cursor_session(path):
     return metadata, messages
 
 
+# — omp session parser ——————————————————————————————————————————————————————
+
+def parse_omp_session(path):
+    """Parse an omp (oh-my-pi) JSONL session file, returning (metadata, messages).
+
+    omp sessions live in <sessions root>/<cwd-slug>/<timestamp>_<uuid>.jsonl.
+    The file opens with a title record and a session header ({type: "session",
+    id, cwd, version, timestamp, title}), then holds one {type: "message"}
+    record per turn whose message carries the role and the content blocks.
+    Only user and assistant text is indexed: thinking blocks, tool calls and
+    tool results are skipped, as are the records the harness injects
+    (custom_message, custom, model_change, thinking_level_change, title).
+
+    A session's subagents keep their own transcripts beside it, at
+    <timestamp>_<uuid>/<AgentId>.jsonl, and are indexed the same way. The
+    advisor runtime's own transcript (__advisor*.jsonl) sits there too but is
+    not a session, so the file walk skips it.
+
+    See https://github.com/can1357/oh-my-pi for the session format.
+    """
+    path = Path(path)
+    session_id = path.stem
+    project = ""
+    title = None
+    earliest_ts = None
+    messages = []
+
+    uuid_match = re.search(
+        r"_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$",
+        path.stem,
+    )
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                etype = entry.get("type", "")
+
+                # Session header — metadata only.
+                if etype == "session":
+                    entry_id = entry.get("id", "")
+                    if entry_id:
+                        session_id = entry_id
+                    if not project:
+                        project = entry.get("cwd", "")
+                    if not title:
+                        title = entry.get("title") or None
+                    ts_ms = parse_iso_timestamp(entry.get("timestamp"))
+                    if ts_ms and (earliest_ts is None or ts_ms < earliest_ts):
+                        earliest_ts = ts_ms
+                    continue
+
+                # The title slot and the title_change record carry the session's
+                # title. The last one wins: omp rewrites the title as the
+                # conversation goes on.
+                if etype in ("title", "title_change"):
+                    entry_title = entry.get("title")
+                    if entry_title:
+                        title = entry_title
+                    continue
+
+                if etype != "message":
+                    continue
+
+                # Track the earliest turn timestamp defensively in case the
+                # header is missing or the file is partially written.
+                ts_ms = parse_iso_timestamp(entry.get("timestamp"))
+                if ts_ms and (earliest_ts is None or ts_ms < earliest_ts):
+                    earliest_ts = ts_ms
+
+                msg = entry.get("message", {})
+                if not isinstance(msg, dict):
+                    continue
+
+                role = msg.get("role", "")
+                # Only index user and assistant messages — skip toolResult and
+                # any other non-conversational role.
+                if role not in ("user", "assistant"):
+                    continue
+
+                text = extract_text(msg.get("content", ""))
+                if text:
+                    messages.append((role, text))
+
+    except (OSError, PermissionError) as e:
+        print(f"Warning: skipping {path}: {e}", file=sys.stderr)
+        return None
+
+    if title:
+        slug = title
+    else:
+        short_id = uuid_match.group(1)[:8] if uuid_match else session_id[:8]
+        ts_match = re.match(r"(\d{4}-\d{2}-\d{2})", path.stem)
+        date_slug = ts_match.group(1) if ts_match else None
+        slug = f"{date_slug}-{short_id}" if date_slug else short_id
+
+    metadata = {
+        "session_id": session_id,
+        "source": "omp",
+        "file_path": str(path),
+        "project": project,
+        "slug": slug,
+        "timestamp": earliest_ts or 0,
+    }
+    return metadata, messages
+
+
 # — opencode session support ———————————————————————————————————————————————
 
 def opencode_data_dirs():
@@ -1035,6 +1177,15 @@ def index_sessions(conn, force=False):
         if Path(fpath).parent.name == Path(fpath).stem:
             sources.append((fpath, "cursor"))
 
+    # omp: ~/.omp/agent/sessions/**/*.jsonl
+    omp_pattern = str(OMP_SESSIONS_DIR / "**" / "*.jsonl")
+    for fpath in glob(omp_pattern, recursive=True):
+        # The advisor runtime writes its own transcript into the session's
+        # directory. It is not a session, so it is left out.
+        if Path(fpath).name.startswith("__advisor"):
+            continue
+        sources.append((fpath, "omp"))
+
     indexed = 0
     skipped = 0
 
@@ -1067,6 +1218,8 @@ def index_sessions(conn, force=False):
             result = parse_pi_session(fpath)
         elif source == "grok":
             result = parse_grok_session(fpath)
+        elif source == "omp":
+            result = parse_omp_session(fpath)
         else:  # cursor
             result = parse_cursor_session(fpath)
 
@@ -1311,15 +1464,15 @@ def format_timestamp(ts_ms):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Search past Claude Code, Codex, pi, Grok, Cursor Agent, and opencode sessions"
+        description="Search past Claude Code, Codex, pi, Grok, Cursor Agent, opencode and omp sessions"
     )
     parser.add_argument("query", nargs="?", help="Search query (FTS5 syntax: quotes for phrases, AND/OR/NOT). Omit to list all sessions in the time window without text matching.")
     parser.add_argument("--project", help="Filter to sessions from a specific project path (prefix match)")
     parser.add_argument("--days", type=int, help="Only sessions from last N days")
     parser.add_argument(
         "--source",
-        choices=["claude", "codex", "pi", "grok", "cursor", "opencode"],
-        help="Filter by source (claude, codex, pi, grok, cursor, or opencode)",
+        choices=["claude", "codex", "pi", "grok", "cursor", "opencode", "omp"],
+        help="Filter by source (claude, codex, pi, grok, cursor, opencode, or omp)",
     )
     parser.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     parser.add_argument("--reindex", action="store_true", help="Force full rebuild of the index")

@@ -1,23 +1,23 @@
 ---
 name: recall
 description: >
-  Search past Claude Code, Codex, pi, Grok, Cursor Agent, and opencode sessions. Triggers: /recall,
+  Search past Claude Code, Codex, pi, Grok, Cursor Agent, opencode and omp sessions. Triggers: /recall,
   "search old conversations", "find a past session", "recall a previous conversation",
   "search session history", "what did we discuss", "remember when we"
 metadata:
   author: arjunkmrm
-  version: "0.6.0"
+  version: "0.7.0"
   license: MIT
 ---
 
-# /recall — Search Past Claude, Codex, pi, Grok, Cursor & opencode Sessions
+# /recall — Search Past Claude, Codex, pi, Grok, Cursor, opencode & omp Sessions
 
-Search all past Claude Code, Codex, pi, Grok, **Cursor Agent** (IDE + CLI), and **opencode** sessions using full-text search with BM25 ranking.
+Search all past Claude Code, Codex, pi, Grok, **Cursor Agent** (IDE + CLI), **opencode** and **omp** sessions using full-text search with BM25 ranking.
 
 ## Usage
 
 ```bash
-python3 ~/.claude/skills/recall/scripts/recall.py [QUERY] [--project PATH] [--days N] [--source claude|codex|pi|grok|cursor|opencode] [--limit N] [--reindex]
+python3 ~/.claude/skills/recall/scripts/recall.py [QUERY] [--project PATH] [--days N] [--source claude|codex|pi|grok|cursor|opencode|omp] [--limit N] [--reindex]
 ```
 
 ## Examples
@@ -62,6 +62,9 @@ python3 ~/.claude/skills/recall/scripts/recall.py "sorting" --source cursor --pr
 # Search only opencode sessions
 python3 ~/.claude/skills/recall/scripts/recall.py "buffer" --source opencode
 
+# Search only omp sessions
+python3 ~/.claude/skills/recall/scripts/recall.py "buffer" --source omp
+
 # Force reindex
 python3 ~/.claude/skills/recall/scripts/recall.py --reindex "test"
 ```
@@ -89,9 +92,8 @@ cd /path/to/project
 codex resume SESSION_ID
 
 # Grok sessions [grok]
-```bash
+cd /path/to/project
 grok --resume SESSION_ID
-```
 
 # Pi sessions [pi]
 cd /path/to/project
@@ -106,6 +108,10 @@ agent --resume SESSION_ID       # UUID from recall output
 # opencode sessions [opencode]
 cd /path/to/project
 opencode --session SESSION_ID
+
+# omp sessions [omp]
+cd /path/to/project
+omp --resume SESSION_ID         # the session uuid; omp resolves prefix matches
 ```
 
 Each result includes a `File:` path. Use it to read the raw transcript (auto-detects format):
@@ -122,22 +128,25 @@ If results are missing `File:` paths, run `--reindex` to backfill.
 ## Notes
 
 - Index is stored at `~/.recall.db` (SQLite FTS5, auto-migrated from `~/.claude/recall.db`)
-- Indexes six sources:
+- Indexes seven sources:
   - `~/.claude/projects/` — Claude Code
   - `~/.codex/sessions/` — Codex
   - `~/.pi/agent/sessions/` — pi
   - `~/.grok/sessions/**/chat_history.jsonl` — Grok
   - `~/.cursor/projects/*/agent-transcripts/` — **Cursor Agent** (IDE + `agent` CLI)
   - `~/.local/share/opencode/opencode.db` — opencode
+  - `~/.omp/agent/sessions/` — omp
 - First run indexes all sessions (a few seconds); subsequent runs are incremental
 - Only user and assistant messages are indexed (tool calls, thinking blocks, state snapshots skipped)
-- Results show `[claude]`, `[codex]`, `[pi]`, `[grok]`, `[cursor]`, or `[opencode]` tags to indicate the source
+- Results show `[claude]`, `[codex]`, `[pi]`, `[grok]`, `[cursor]`, `[opencode]`, or `[omp]` tags to indicate the source
 - Dual-table FTS: English queries use Porter stemming, CJK queries use trigram matching
 - Omit the query argument for **list mode** — every session in the window, sorted by recency, no FTS
 - Provide a query for full-text search; both modes accept `--project`, `--days`, `--source`, `--limit`
 - opencode keeps every session in one SQLite database rather than a file apiece; `OPENCODE_DB` points recall at a specific database and `OPENCODE_DATA_DIR` at its data directory
+- omp keeps one JSONL file per session under `~/.omp/agent/sessions/`; subagent transcripts are indexed too, and `OMP_SESSION_DIR` points recall at a different sessions directory
 - **Upgrading from 0.3.x**: run `--reindex` once to pull in pi sessions
 - **Upgrading from 0.4.x**: run `--reindex` once to pull in Grok, Cursor Agent, and opencode sessions
+- **Upgrading from 0.6.x**: run `--reindex` once to pull in omp sessions
 - **Upgrading from 0.2.x**: run `--reindex` once to build the CJK index
 
 ## Cursor-specific behavior
@@ -151,3 +160,11 @@ If results are missing `File:` paths, run `--reindex` to backfill.
 - Sessions live in a single SQLite database (`opencode.db`), not per-session files; `read_session.py` reads it from a `<db>#<session-id>` reference or a bare `ses_...` id.
 - The data directory is discovered across candidates — `$XDG_DATA_HOME/opencode` (else `~/.local/share/opencode`), macOS `~/Library/Application Support/opencode`, and Windows `%LOCALAPPDATA%\opencode\Data` — and the database is chosen from whichever candidate actually holds one (preferring `opencode.db`). Override the directory with `OPENCODE_DATA_DIR`, or point at a specific database with `OPENCODE_DB`.
 - The database is opened read-only. All sessions are indexed, including subagent sessions (those with a parent).
+
+## omp-specific behavior
+
+- Sessions live in one JSONL file each, under `<sessions root>/<cwd-slug>/<timestamp>_<uuid>.jsonl`, with the session id, the cwd and the title in the file's header record. The `File:` path in a result is that file, so `read_session.py` reads it directly.
+- A session's subagents keep their own transcripts beside it, at `<timestamp>_<uuid>/<AgentId>.jsonl`, and are indexed too. The advisor runtime's own transcript (`__advisor*.jsonl`) sits there as well but is not a session, so it is skipped.
+- The session title is shown as the result slug; sessions without one fall back to the date and a short id.
+- The sessions root is `~/.omp/agent/sessions`, moved by `PI_CODING_AGENT_DIR` and, on Linux and macOS, by `XDG_DATA_HOME` once `$XDG_DATA_HOME/omp` exists. `OMP_SESSION_DIR` points recall at a different sessions directory.
+- Resume: `omp --resume <session-id>` (the uuid from recall output; omp resolves prefix matches).

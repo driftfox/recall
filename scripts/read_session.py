@@ -63,8 +63,8 @@ def iter_messages(path):
                     continue
                 content = msg.get("content", "")
 
-            elif fmt == "pi":
-                # Pi: {type, id, parentId, timestamp, message: {role, content, ...}}
+            elif fmt in ("pi", "omp"):
+                # Pi/omp: {type, id, parentId, timestamp, message: {role, content, ...}}
                 # Header is {type: "session", id, cwd, version, ...} — skip.
                 etype = entry.get("type", "")
                 if etype != "message":
@@ -181,7 +181,7 @@ def iter_opencode_messages(ref):
 
 
 def detect_format(path):
-    """Detect whether a session file is Claude Code, Codex, pi, Grok, Cursor, or opencode format.
+    """Detect whether a session file is Claude Code, Codex, pi, Grok, Cursor, opencode, or omp format.
 
     opencode references (`<db>#<session-id>`) are settled by shape. Cursor and
     Grok are settled by path. Cursor transcripts live under
@@ -190,9 +190,10 @@ def detect_format(path):
     plain to tell apart from the others by content alone.
 
     Otherwise detection runs on the first non-empty parseable line. Order
-    matters: pi headers carry both `type: "session"` and `cwd`, which is the
-    most distinctive signature; Claude files have `parentUuid` or a top-level
-    `message`; Codex files have `record_type`, `instructions`, or
+    matters: omp opens a file with its title slot and its header carries
+    `titleSource`; pi headers carry both `type: "session"` and `cwd`, which is
+    the most distinctive signature; Claude files have `parentUuid` or a
+    top-level `message`; Codex files have `record_type`, `instructions`, or
     `type: "session_meta"`.
     """
     if looks_like_opencode(path):
@@ -214,6 +215,12 @@ def detect_format(path):
             except json.JSONDecodeError:
                 continue
             etype = entry.get("type", "")
+
+            # omp opens a file with its title slot ({type: "title", ...}) and
+            # its session header carries titleSource. Checked before pi,
+            # because omp's header has the same shape as pi's.
+            if etype == "title" or "titleSource" in entry:
+                return "omp"
 
             # Pi v2/v3 header: {type: "session", id, cwd, version, ...}.
             # Disambiguates from any "session"-typed entries elsewhere by
@@ -237,7 +244,7 @@ def detect_format(path):
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Pretty-print a Claude Code, Codex, pi, Grok, Cursor Agent, or opencode session transcript"
+        description="Pretty-print a Claude Code, Codex, pi, Grok, Cursor Agent, opencode or omp session transcript"
     )
     parser.add_argument("path", help="Path to a session .jsonl file")
     parser.add_argument("--pretty", action="store_true", help="Human-readable output instead of JSON")

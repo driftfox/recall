@@ -1,6 +1,6 @@
 # recall
 
-Ever lost a conversation session with Claude Code, Codex, pi, Grok, Cursor Agent, or opencode and wish you could resume it? This skill lets your agents search across all your past conversations with full-text search. Builds a SQLite FTS5 index over `~/.claude/projects/`, `~/.codex/sessions/`, `~/.pi/agent/sessions/`, `~/.grok/sessions/`, `~/.cursor/projects/*/agent-transcripts/`, and opencode's SQLite database (`opencode.db`) with BM25 ranking, Porter stemming, CJK support, and incremental updates.
+Ever lost a conversation session with Claude Code, Codex, pi, Grok, Cursor Agent, opencode or omp and wish you could resume it? This skill lets your agents search across all your past conversations with full-text search. Builds a SQLite FTS5 index over `~/.claude/projects/`, `~/.codex/sessions/`, `~/.pi/agent/sessions/`, `~/.grok/sessions/`, `~/.cursor/projects/*/agent-transcripts/`, opencode's SQLite database (`opencode.db`) and omp's `~/.omp/agent/sessions/` with BM25 ranking, Porter stemming, CJK support, and incremental updates.
 
 ## Install
 
@@ -8,7 +8,7 @@ Ever lost a conversation session with Claude Code, Codex, pi, Grok, Cursor Agent
 npx skills add arjunkmrm/recall
 ```
 
-Then use `/recall` in Claude Code (or Codex, pi, or Grok) or ask "find a past session where we talked about foo" (you might need to restart your agent).
+Then use `/recall` in Claude Code (or Codex, pi, Grok, Cursor Agent, opencode, or omp) or ask "find a past session where we talked about foo" (you might need to restart your agent).
 
 ## How it works
 ### Index
@@ -24,7 +24,9 @@ Then use `/recall` in Claude Code (or Codex, pi, or Grok) or ask "find a past se
                                               │
   ~/.cursor/projects/**/agent-transcripts/ ───┤
                                               │
-  opencode.db (SQLite) ───────────────────────┘
+  opencode.db (SQLite) ───────────────────────┤
+                                              │
+  ~/.omp/agent/sessions/**/*.jsonl ───────────┘
 ```
 ### Query
 ```
@@ -49,7 +51,7 @@ Then use `/recall` in Claude Code (or Codex, pi, or Grok) or ask "find a past se
 - CJK messages are selectively indexed into the trigram table; query routing is automatic
 - Skips tool_use, tool_result, thinking, and image blocks
 - Results ranked by BM25 with a slight recency bias (recent sessions get up to a 20% boost, decaying with a 30-day half-life)
-- Results tagged `[claude]`, `[codex]`, `[pi]`, `[grok]`, `[cursor]`, or `[opencode]` with highlighted excerpts
+- Results tagged `[claude]`, `[codex]`, `[pi]`, `[grok]`, `[cursor]`, `[opencode]`, or `[omp]` with highlighted excerpts
 - No dependencies — Python 3.9+ stdlib only (sqlite3, json, argparse)
 
 ## Tests

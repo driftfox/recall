@@ -37,6 +37,7 @@ class RecencyBias(unittest.TestCase):
                             ("CODEX_SESSIONS_DIR", self.root / "none"),
                             ("PI_SESSIONS_DIR", self.root / "none"),
                             ("CURSOR_PROJECTS_DIR", self.root / "none"),
+                            ("OMP_SESSIONS_DIR", self.root / "none"),
                             ("OPENCODE_DB", self.root / "none")):
             self.addCleanup(setattr, recall, name, getattr(recall, name))
             setattr(recall, name, value)

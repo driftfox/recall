@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.7.0
+
+- Add omp (`oh-my-pi`) session support — indexes `~/.omp/agent/sessions/`
+  alongside Claude Code, Codex, pi, Grok, Cursor Agent and opencode
+- New `--source omp` filter; results tagged `[omp]`
+- omp keeps one JSONL file per session under `<sessions root>/<cwd-slug>/`,
+  with the session id, the cwd and the title in the file's header record. Only
+  user and assistant text is indexed; thinking blocks, tool calls, tool results
+  and the records the harness injects are skipped
+- A session's subagents keep their own transcripts beside it, at
+  `<timestamp>_<uuid>/<AgentId>.jsonl`, and are indexed too; the advisor
+  runtime's own transcript (`__advisor*.jsonl`) sits there as well but is not a
+  session, so it is skipped
+- The session title is shown as the result slug; sessions without one fall
+  back to the date and a short id
+- The sessions root is `~/.omp/agent/sessions`, moved by `PI_CODING_AGENT_DIR`
+  and, on Linux and macOS, by `XDG_DATA_HOME` once `$XDG_DATA_HOME/omp`
+  exists. `OMP_SESSION_DIR` points recall at a different sessions directory
+- `read_session.py` detects omp transcripts by the title slot every omp file
+  opens with, and reads their turns with the same reader pi uses
+- Resume: `omp --resume <session-id>` (see SKILL.md)
+
 ## 0.6.0
 
 - Add opencode session support — indexes sessions from opencode's SQLite

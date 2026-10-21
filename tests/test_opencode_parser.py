@@ -442,6 +442,7 @@ class TestIndexingOpencode(OpencodeFixture):
                             ("PI_SESSIONS_DIR", self.root / "none"),
                             ("GROK_SESSIONS_DIR", self.root / "none"),
                             ("CURSOR_PROJECTS_DIR", self.root / "none"),
+                            ("OMP_SESSIONS_DIR", self.root / "none"),
                             ("OPENCODE_DB", Path(self.db))):
             self.addCleanup(setattr, recall, name, getattr(recall, name))
             setattr(recall, name, value)
