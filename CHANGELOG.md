@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0
+
+- Add opencode session support — indexes the opencode SQLite database
+  (`~/.local/share/opencode/opencode.db`) alongside Claude Code, Codex, pi and
+  Grok
+- New `--source opencode` filter; results tagged `[opencode]`
+- opencode keeps every session in one database rather than a file per session,
+  so sessions are tracked under a synthetic `<database>#<session-id>` path and
+  updated incrementally from `session.time_updated`; subagent sessions (those
+  with a parent) are indexed too
+- Only `text` parts between user and assistant are indexed; reasoning, tool
+  calls, patches and step markers are skipped, as are text parts flagged
+  `synthetic`, which are harness-injected context
+- `read_session.py` reads opencode sessions from a bare `ses_...` id or the
+  `<database>#<session-id>` reference recall prints
+
 ## Unreleased
 
 - Add Grok CLI session support — indexes `~/.grok/sessions/**/chat_history.jsonl`

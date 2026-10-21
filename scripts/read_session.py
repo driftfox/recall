@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pretty-print a Claude Code, Codex, pi, or Grok session transcript."""
+"""Pretty-print a Claude Code, Codex, pi, Grok, or opencode session transcript."""
 
 import json
 import sys
@@ -171,20 +171,58 @@ def detect_format(path):
     return "claude"
 
 
+def looks_like_opencode(ref):
+    """True when `ref` names an opencode session.
+
+    Accepts a bare session id (`ses_...`) or the `<db-path>#<session-id>` value
+    recall prints as its File: line.
+    """
+    import recall
+    if not ref:
+        return False
+    if "#" in ref:
+        db_ref, _, session_id = ref.rpartition("#")
+        return bool(db_ref) and bool(recall.OPENCODE_SESSION_ID_RE.match(session_id))
+    return bool(recall.OPENCODE_SESSION_ID_RE.match(ref))
+
+
+def iter_opencode_messages(ref):
+    """Yield (role, text) pairs for an opencode session reference.
+
+    A `<db-path>#<session-id>` reference reads that database; a bare `ses_...`
+    id reads opencode's default database. Reuses recall's reader so the
+    transcript matches what recall indexes.
+    """
+    import recall
+    if "#" in ref:
+        db_ref, _, session_id = ref.rpartition("#")
+        db_path = Path(db_ref)
+    else:
+        db_path = recall.opencode_db_path()
+        session_id = ref
+    conn = recall.connect_opencode_db(db_path)
+    try:
+        yield from recall.opencode_session_messages(conn, session_id)
+    finally:
+        conn.close()
+
+
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="Pretty-print a Claude Code, Codex, or pi session transcript")
-    parser.add_argument("path", help="Path to a session .jsonl file")
+    parser = argparse.ArgumentParser(description="Pretty-print a Claude Code, Codex, pi, Grok, or opencode session transcript")
+    parser.add_argument("path", help="Path to a session .jsonl file, or an opencode session id (ses_...) or <db-path>#<session-id>")
     parser.add_argument("--pretty", action="store_true", help="Human-readable output instead of JSON")
     args = parser.parse_args()
 
+    turns = iter_opencode_messages(args.path) if looks_like_opencode(args.path) else iter_messages(args.path)
+
     if args.pretty:
-        for role, text in iter_messages(args.path):
+        for role, text in turns:
             print(f"--- {role} ---")
             print(text[:500])
             print()
     else:
-        msgs = [{"role": role, "text": text} for role, text in iter_messages(args.path)]
+        msgs = [{"role": role, "text": text} for role, text in turns]
         print(json.dumps(msgs, indent=2))
 
 

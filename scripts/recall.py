@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Search past Claude Code, Codex, pi and Grok sessions using FTS5 full-text search."""
+"""Search past Claude Code, Codex, pi, Grok and opencode sessions using FTS5 full-text search."""
 
 import argparse
 import json
@@ -30,6 +30,45 @@ CLAUDE_PROJECTS_DIR = CLAUDE_DIR / "projects"
 CODEX_SESSIONS_DIR = CODEX_DIR / "sessions"
 PI_SESSIONS_DIR = PI_DIR / "agent" / "sessions"
 GROK_SESSIONS_DIR = GROK_DIR / "sessions"
+
+
+def opencode_data_dir():
+    """Directory holding opencode's data, including its SQLite database.
+
+    opencode resolves its data directory through xdg-basedir on every platform,
+    so the default is $XDG_DATA_HOME/opencode (falling back to
+    ~/.local/share/opencode) even on Windows. OPENCODE_DATA_DIR overrides the
+    whole directory.
+    """
+    explicit = os.environ.get("OPENCODE_DATA_DIR")
+    if explicit:
+        return Path(explicit)
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "opencode"
+
+
+def opencode_db_path():
+    """Path to opencode's SQLite database.
+
+    OPENCODE_DB points straight at a database file. Otherwise the default
+    `opencode.db` in the data directory is used, falling back to a single
+    channel build (`opencode-<channel>.db`, e.g. `opencode-beta.db`) when no
+    stable database exists. The path is returned even when it does not exist,
+    so callers can treat a missing database as "no opencode sessions".
+    """
+    explicit = os.environ.get("OPENCODE_DB")
+    if explicit:
+        return Path(explicit)
+    data_dir = opencode_data_dir()
+    stable = data_dir / "opencode.db"
+    if stable.exists():
+        return stable
+    channels = sorted(data_dir.glob("opencode-*.db"))
+    if len(channels) == 1:
+        return channels[0]
+    return stable
+
 
 
 # How long a run waits for another run to finish indexing before giving up and
@@ -619,6 +658,147 @@ def parse_grok_session(path):
     return metadata, messages
 
 
+# — opencode session reader ————————————————————————————————————————————————
+#
+# opencode keeps every session in one SQLite database
+# (~/.local/share/opencode/opencode.db) rather than a file per session. A
+# session's turns live in `message` rows (role inside a JSON `data` blob) with
+# the content split across `part` rows of typed chunks.
+
+OPENCODE_SESSION_ID_RE = re.compile(r"^ses_[A-Za-z0-9_-]+$")
+
+
+def connect_opencode_db(db_path):
+    """Open opencode's database read-only, so recall never writes to it.
+
+    The database may be in WAL mode while opencode is running; mode=ro reads
+    the committed contents without ever taking a write lock.
+    """
+    uri = "file:" + str(db_path).replace("\\", "/") + "?mode=ro"
+    return sqlite3.connect(uri, uri=True)
+
+
+def opencode_session_messages(conn, session_id):
+    """Return (role, text) pairs for one opencode session, in turn order.
+
+    Only `text` parts carry conversational content; reasoning, tool calls,
+    patches and step markers are skipped. Text parts flagged `synthetic` are
+    harness-injected context rather than anything the user or model said, so
+    they are skipped too.
+    """
+    messages = conn.execute(
+        "SELECT id, data FROM message WHERE session_id = ? ORDER BY time_created, id",
+        (session_id,),
+    ).fetchall()
+
+    roles = {}
+    for msg_id, data in messages:
+        try:
+            roles[msg_id] = json.loads(data).get("role", "")
+        except (json.JSONDecodeError, TypeError):
+            roles[msg_id] = ""
+
+    texts = {}
+    for msg_id, data in conn.execute(
+        "SELECT message_id, data FROM part WHERE session_id = ? ORDER BY time_created, id",
+        (session_id,),
+    ).fetchall():
+        try:
+            part = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if part.get("type") != "text" or part.get("synthetic"):
+            continue
+        text = part.get("text", "")
+        if text:
+            texts.setdefault(msg_id, []).append(text)
+
+    result = []
+    for msg_id, _ in messages:
+        role = roles.get(msg_id, "")
+        if role not in ("user", "assistant"):
+            continue
+        text = "\n".join(texts.get(msg_id, []))
+        if text:
+            result.append((role, text))
+    return result
+
+
+def index_opencode_sessions(conn, existing, force=False):
+    """Index opencode sessions from its SQLite database.
+
+    opencode stores every session in one database rather than a file apiece, so
+    this is not driven by the file walk in index_sessions(). Each session is
+    tracked under the pseudo-file "<db>#<session_id>" with its mtime taken from
+    `session.time_updated`, so the same incremental skip/replace logic applies.
+    Both top-level and subagent sessions (those with a parent_id) are indexed.
+    Returns the number of sessions (re)indexed.
+    """
+    db_path = opencode_db_path()
+    if not db_path.is_file():
+        return 0
+
+    try:
+        src = connect_opencode_db(db_path)
+    except sqlite3.Error as e:
+        print(f"Warning: cannot open opencode database {db_path}: {e}", file=sys.stderr)
+        return 0
+
+    indexed = 0
+    try:
+        rows = src.execute(
+            "SELECT id, directory, slug, title, time_created, time_updated FROM session"
+        ).fetchall()
+
+        for sid, directory, slug, title, time_created, time_updated in rows:
+            file_path = f"{db_path}#{sid}"
+            mtime = float(time_updated or time_created or 0)
+
+            if not force and file_path in existing and existing[file_path][1] == mtime:
+                continue
+
+            if file_path in existing:
+                old_sid = existing[file_path][0]
+                conn.execute("DELETE FROM sessions WHERE session_id = ?", (old_sid,))
+                conn.execute("DELETE FROM messages WHERE session_id = ?", (old_sid,))
+                conn.execute("DELETE FROM messages_cjk WHERE session_id = ?", (old_sid,))
+
+            metadata = {
+                "session_id": sid,
+                "source": "opencode",
+                "file_path": file_path,
+                "project": directory or "",
+                "slug": slug or title or sid[:12],
+                "timestamp": int(time_created or 0),
+            }
+            messages = opencode_session_messages(src, sid)
+
+            conn.execute(
+                "INSERT OR REPLACE INTO sessions (session_id, source, file_path, project, slug, timestamp, mtime) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (metadata["session_id"], metadata["source"], metadata["file_path"],
+                 metadata["project"], metadata["slug"], metadata["timestamp"], mtime),
+            )
+
+            msg_rows = [(sid, role, text) for role, text in messages]
+            conn.executemany(
+                "INSERT INTO messages (session_id, role, text) VALUES (?, ?, ?)",
+                msg_rows,
+            )
+            cjk_rows = [r for r in msg_rows if has_cjk(r[2])]
+            if cjk_rows:
+                conn.executemany(
+                    "INSERT INTO messages_cjk (session_id, role, text) VALUES (?, ?, ?)",
+                    cjk_rows,
+                )
+            indexed += 1
+    except sqlite3.Error as e:
+        print(f"Warning: skipping opencode database {db_path}: {e}", file=sys.stderr)
+    finally:
+        src.close()
+
+    return indexed
+
+
 # — Indexing ———————————————————————————————————————————————————————————————
 
 def index_sessions(conn, force=False):
@@ -718,6 +898,10 @@ def index_sessions(conn, force=False):
             )
 
         indexed += 1
+
+    # opencode is one database, not a tree of files, so it is indexed here
+    # rather than collected into `sources` above.
+    indexed += index_opencode_sessions(conn, existing, force=force)
 
     conn.commit()
 
@@ -928,11 +1112,11 @@ def format_timestamp(ts_ms):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Search past Claude Code, Codex, pi and Grok sessions")
+    parser = argparse.ArgumentParser(description="Search past Claude Code, Codex, pi, Grok and opencode sessions")
     parser.add_argument("query", nargs="?", help="Search query (FTS5 syntax: quotes for phrases, AND/OR/NOT). Omit to list all sessions in the time window without text matching.")
     parser.add_argument("--project", help="Filter to sessions from a specific project path (prefix match)")
     parser.add_argument("--days", type=int, help="Only sessions from last N days")
-    parser.add_argument("--source", choices=["claude", "codex", "pi", "grok"], help="Filter by source (claude, codex, pi, or grok)")
+    parser.add_argument("--source", choices=["claude", "codex", "pi", "grok", "opencode"], help="Filter by source (claude, codex, pi, grok, or opencode)")
     parser.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
     parser.add_argument("--reindex", action="store_true", help="Force full rebuild of the index")
 

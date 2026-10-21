@@ -1,6 +1,6 @@
 # recall
 
-Ever lost a conversation session with Claude Code, Codex, pi or Grok and wish you could resume it? This skill lets your agents search across all your past conversations with full-text search. Builds a SQLite FTS5 index over `~/.claude/projects/`, `~/.codex/sessions/`, `~/.pi/agent/sessions/`, and `~/.grok/sessions/` with BM25 ranking, Porter stemming, CJK support, and incremental updates.
+Ever lost a conversation session with Claude Code, Codex, pi, Grok or opencode and wish you could resume it? This skill lets your agents search across all your past conversations with full-text search. Builds a SQLite FTS5 index over `~/.claude/projects/`, `~/.codex/sessions/`, `~/.pi/agent/sessions/`, `~/.grok/sessions/`, and opencode's `~/.local/share/opencode/opencode.db` with BM25 ranking, Porter stemming, CJK support, and incremental updates.
 
 ## Install
 
@@ -8,7 +8,7 @@ Ever lost a conversation session with Claude Code, Codex, pi or Grok and wish yo
 npx skills add arjunkmrm/recall
 ```
 
-Then use `/recall` in Claude Code (or Codex, pi, or Grok) or ask "find a past session where we talked about foo" (you might need to restart your agent).
+Then use `/recall` in Claude Code (or Codex, pi, Grok, or opencode) or ask "find a past session where we talked about foo" (you might need to restart your agent).
 
 ## How it works
 ### Index
@@ -19,7 +19,8 @@ Then use `/recall` in Claude Code (or Codex, pi, or Grok) or ask "find a past se
   ~/.codex/sessions/**/*.jsonl ───┼─▶ Index ──▶ ~/.recall.db (SQLite FTS5)
                                   │   [incremental - mtime-based]
   ~/.pi/agent/sessions/**/*.jsonl │
-  ~/.grok/sessions/**/chat_history.jsonl ┘
+  ~/.grok/sessions/**/chat_history.jsonl │
+  ~/.local/share/opencode/opencode.db (one DB) ┘
 ```
 ### Query
 ```
@@ -44,7 +45,7 @@ Then use `/recall` in Claude Code (or Codex, pi, or Grok) or ask "find a past se
 - CJK messages are selectively indexed into the trigram table; query routing is automatic
 - Skips tool_use, tool_result, thinking, and image blocks
 - Results ranked by BM25 with a slight recency bias (recent sessions get up to a 20% boost, decaying with a 30-day half-life)
-- Results tagged `[claude]`, `[codex]`, `[pi]`, or `[grok]` with highlighted excerpts
+- Results tagged `[claude]`, `[codex]`, `[pi]`, `[grok]`, or `[opencode]` with highlighted excerpts
 - No dependencies — Python 3.9+ stdlib only (sqlite3, json, argparse)
 
 ## Tests

@@ -49,6 +49,10 @@ class RolesAreNotSearchable(unittest.TestCase):
             self.addCleanup(setattr, recall, name, getattr(recall, name))
             setattr(recall, name, value)
 
+        # Keep this run off the host's real opencode database.
+        self.addCleanup(os.environ.pop, "OPENCODE_DB", None)
+        os.environ["OPENCODE_DB"] = str(self.root / "none" / "opencode.db")
+
     def session(self, name, entries):
         path = self.projects / "proj" / f"{name}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
