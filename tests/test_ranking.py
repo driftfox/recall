@@ -43,6 +43,10 @@ class RecencyBias(unittest.TestCase):
         self.addCleanup(os.environ.pop, "OPENCODE_DB", None)
         os.environ["OPENCODE_DB"] = str(self.root / "none" / "opencode.db")
 
+        # Keep this run off the host's real omp sessions.
+        self.addCleanup(os.environ.pop, "OMP_SESSION_DIR", None)
+        os.environ["OMP_SESSION_DIR"] = str(self.root / "none")
+
     def seed(self, ages_in_days):
         """One session per age, each matching the query exactly as well."""
         now_ms = time.time() * 1000

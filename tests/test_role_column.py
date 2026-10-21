@@ -53,6 +53,10 @@ class RolesAreNotSearchable(unittest.TestCase):
         self.addCleanup(os.environ.pop, "OPENCODE_DB", None)
         os.environ["OPENCODE_DB"] = str(self.root / "none" / "opencode.db")
 
+        # Keep this run off the host's real omp sessions.
+        self.addCleanup(os.environ.pop, "OMP_SESSION_DIR", None)
+        os.environ["OMP_SESSION_DIR"] = str(self.root / "none")
+
     def session(self, name, entries):
         path = self.projects / "proj" / f"{name}.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -178,6 +178,10 @@ class IndexOpenCodeSessions(OpenCodeFixture):
             self.addCleanup(setattr, recall, name, getattr(recall, name))
             setattr(recall, name, self.root / "none")
 
+        # Keep this run off the host's real omp sessions.
+        self.addCleanup(os.environ.pop, "OMP_SESSION_DIR", None)
+        os.environ["OMP_SESSION_DIR"] = str(self.root / "none")
+
     def indexed(self, force=False):
         conn = sqlite3.connect(str(self.root / "index.db"))
         recall.create_schema(conn)
